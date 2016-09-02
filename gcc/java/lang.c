@@ -128,12 +128,22 @@ int flag_wall = 0;
 /* The encoding of the source file.  */
 const char *current_encoding = NULL;
 
+/* When nonzero, report use of deprecated classes, methods, or fields.  */
+int flag_deprecated = 1;
+
+/* When zero, don't optimize static class initialization. This flag shouldn't
+   be tested alone, use STATIC_CLASS_INITIALIZATION_OPTIMIZATION_P instead.  */
+/* FIXME: Make this work with gimplify.  */
+/* int flag_optimize_sci = 0;  */
+
+/* Don't attempt to verify invocations.  */
+int flag_verify_invocations = 0; 
+
+/* True if the new bytecode verifier should be used.  */
+int flag_new_verifier = 0;
+
 /* When nonzero, print extra version information.  */
 static int v_flag = 0;
-
-/* Set nonzero if the user specified -finline-functions on the command
-   line.  */
-int flag_really_inline = 0;
 
 JCF *current_jcf;
 
@@ -322,11 +332,6 @@ java_handle_option (size_t scode, const char *arg, int value)
       jcf_path_extdirs_arg (arg);
       break;
 
-    case OPT_finline_functions:
-      flag_inline_functions = value;
-      flag_really_inline = value;
-      break;
-
     case OPT_foutput_class_dir_:
       jcf_write_base_directory = arg;
       break;
@@ -354,9 +359,6 @@ java_init (void)
   extern int flag_minimal_debug;
   flag_minimal_debug = 0;
 #endif
-
-  if (flag_inline_functions)
-    flag_inline_trees = 1;
 
   /* FIXME: Indirect dispatch isn't yet compatible with static class
      init optimization.  */
@@ -580,6 +582,12 @@ java_init_options (unsigned int argc ATTRIBUTE_UNUSED,
   /* Java requires left-to-right evaluation of subexpressions.  */
   flag_evaluation_order = 1;
 
+  /* APPLE LOCAL begin mainline 4840357 */
+  /* Unit at a time is disabled for Java because it is considered
+     too expensive.  */
+  no_unit_at_a_time_default = 1;
+  /* APPLE LOCAL end mainline 4840357 */
+
   jcf_path_init ();
 
   return CL_Java;
@@ -603,9 +611,17 @@ java_post_options (const char **pfilename)
   if (!flag_no_inline)
     flag_no_inline = 1;
   if (flag_inline_functions)
+    flag_inline_trees = 2;
+
+  /* An absolute requirement: if we're not using indirect dispatch, we
+     must always verify everything.  */
+  if (! flag_indirect_dispatch)
+    flag_verify_invocations = true;
+  else
     {
-      flag_inline_trees = 2;
-      flag_inline_functions = 0;
+      /* If we are using indirect dispatch, then we want the new
+	 verifier as well.  */
+      flag_new_verifier = 1;
     }
 
   /* Open input file.  */
@@ -731,6 +747,10 @@ java_tree_inlining_walk_subtrees (tree *tp ATTRIBUTE_UNUSED,
       WALK_SUBTREE (BLOCK_EXPR_BODY (t));
       return NULL_TREE;
 
+    case EXIT_BLOCK_EXPR:
+      *subtrees = 0;
+      return NULL_TREE;
+
     default:
       return NULL_TREE;
     }
@@ -782,11 +802,18 @@ int disable_typechecking_for_spec_flag = 0;
 
 /* APPLE LOCAL begin CW asm blocks */
 /* Dummies needed because we use them from cpplib, yuck.  */
-int flag_cw_asm_blocks;
-int cw_asm_state;
-int cw_asm_in_operands;
+int flag_iasm_blocks;
+int iasm_state;
+int iasm_in_operands;
 /* APPLE LOCAL end CW asm blocks */
 
+/* APPLE LOCAL begin 4174833 */
+tree
+objc_is_class_name (tree ARG_UNUSED (arg))
+{
+  return 0;
+}
+/* APPLE LOCAL end 4174833 */
 
 /* Every call to a static constructor has an associated boolean
    variable which is in the outermost scope of the calling method.
@@ -971,13 +998,12 @@ java_dump_tree (void *dump_info, tree t)
       return true;
 
     case LABELED_BLOCK_EXPR:
-      dump_child ("label", TREE_OPERAND (t, 0));
-      dump_child ("block", TREE_OPERAND (t, 1));
+      dump_child ("label", LABELED_BLOCK_LABEL (t));
+      dump_child ("block", LABELED_BLOCK_BODY (t));
       return true;
 
     case EXIT_BLOCK_EXPR:
-      dump_child ("block", TREE_OPERAND (t, 0));
-      dump_child ("val", TREE_OPERAND (t, 1));
+      dump_child ("block", EXIT_BLOCK_LABELED_BLOCK (t));
       return true;
 
     case BLOCK:
@@ -1033,6 +1059,10 @@ java_get_callee_fndecl (tree call_expr)
   tree method, table, element, atable_methods;
 
   HOST_WIDE_INT index;
+
+  /* FIXME: This is disabled because we end up passing calls through
+     the PLT, and we do NOT want to do that.  */
+  return NULL;
 
   if (TREE_CODE (call_expr) != CALL_EXPR)
     return NULL;

@@ -6,6 +6,12 @@
 #ifndef _STDINT_H_
 #define _STDINT_H_
 
+#if __LP64__
+#define __WORDSIZE 64
+#else
+#define __WORDSIZE 32
+#endif
+
 /* from ISO/IEC 988:1999 spec */
 
 /* 7.18.1.1 Exact-width integer types */
@@ -174,10 +180,19 @@ typedef unsigned long long      uintmax_t;
 
 /* 7.18.2.4 Limits of integer types capable of holding object pointers */
 
+#if __WORDSIZE == 64
+#define INTPTR_MIN	  INT64_MIN
+#define INTPTR_MAX	  INT64_MAX
+#else
 #define INTPTR_MIN        INT32_MIN
 #define INTPTR_MAX        INT32_MAX
-                             
+#endif
+
+#if __WORDSIZE == 64
+#define UINTPTR_MAX	  UINT64_MAX
+#else
 #define UINTPTR_MAX       UINT32_MAX
+#endif
 
 /* 7.18.2.5 Limits of greatest-width integer types */
 #define INTMAX_MIN        INT64_MIN
@@ -186,14 +201,23 @@ typedef unsigned long long      uintmax_t;
 #define UINTMAX_MAX       UINT64_MAX
 
 /* 7.18.3 "Other" */
+#if __WORDSIZE == 64
+#define PTRDIFF_MIN	  INT64_MIN
+#define PTRDIFF_MAX	  INT64_MAX
+#else
 #define PTRDIFF_MIN       INT32_MIN
 #define PTRDIFF_MAX       INT32_MAX
+#endif
 
 /* We have no sig_atomic_t yet, so no SIG_ATOMIC_{MIN,MAX}.
    Should end up being {-127,127} or {0,255} ... or bigger.
    My bet would be on one of {U}INT32_{MIN,MAX}. */
 
+#if __WORDSIZE == 64
+#define SIZE_MAX	  UINT64_MAX
+#else
 #define SIZE_MAX          UINT32_MAX
+#endif
 
 #ifndef WCHAR_MAX
 #  ifdef __WCHAR_MAX__
@@ -207,10 +231,12 @@ typedef unsigned long long      uintmax_t;
    (-WCHAR_MAX-1) if wchar_t is a signed type.  Unfortunately,
    it turns out that -fshort-wchar changes the signedness of
    the type. */
-#if WCHAR_MAX == 0xffff
-#  define WCHAR_MIN       0
-#else
-#  define WCHAR_MIN       (-WCHAR_MAX-1)
+#ifndef WCHAR_MIN
+#  if WCHAR_MAX == 0xffff
+#    define WCHAR_MIN       0
+#  else
+#    define WCHAR_MIN       (-WCHAR_MAX-1)
+#  endif
 #endif
 
 #define WINT_MIN	  INT32_MIN
@@ -223,18 +249,18 @@ typedef unsigned long long      uintmax_t;
 
 /* "C++ implementations should define these macros only when
  *  __STDC_CONSTANT_MACROS is defined before <stdint.h> is included."
- */ 
+ */
 #if (! defined(__cplusplus)) || defined(__STDC_CONSTANT_MACROS)
 
 /* 7.18.4 Macros for integer constants */
 #define INT8_C(v)    (v)
 #define INT16_C(v)   (v)
-#define INT32_C(v)   (v ## L)
+#define INT32_C(v)   (v)
 #define INT64_C(v)   (v ## LL)
 
 #define UINT8_C(v)   (v ## U)
 #define UINT16_C(v)  (v ## U)
-#define UINT32_C(v)  (v ## UL)
+#define UINT32_C(v)  (v ## U)
 #define UINT64_C(v)  (v ## ULL)
 
 #define INTMAX_C(v)  (v ## LL)

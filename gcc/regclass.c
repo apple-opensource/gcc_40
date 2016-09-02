@@ -1,6 +1,6 @@
 /* Compute register class preferences for pseudo-registers.
    Copyright (C) 1987, 1988, 1991, 1992, 1993, 1994, 1995, 1996
-   1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004
+   1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005
    Free Software Foundation, Inc.
 
 This file is part of GCC.
@@ -151,6 +151,15 @@ int reg_alloc_order[FIRST_PSEUDO_REGISTER] = REG_ALLOC_ORDER;
 int inv_reg_alloc_order[FIRST_PSEUDO_REGISTER];
 #endif
 
+/* APPLE LOCAL begin ARM add DIMODE_REG_ALLOC_ORDER */
+#ifdef DIMODE_REG_ALLOC_ORDER
+int dimode_reg_alloc_order[FIRST_PSEUDO_REGISTER] = DIMODE_REG_ALLOC_ORDER;
+
+/* The inverse of reg_alloc_order.  */
+int dimode_inv_reg_alloc_order[FIRST_PSEUDO_REGISTER];
+#endif
+/* APPLE LOCAL end ARM add DIMODE_REG_ALLOC_ORDER */
+
 /* For each reg class, a HARD_REG_SET saying which registers are in it.  */
 
 HARD_REG_SET reg_class_contents[N_REG_CLASSES];
@@ -191,6 +200,10 @@ enum reg_class reg_class_superunion[N_REG_CLASSES][N_REG_CLASSES];
 /* Array containing all of the register names.  */
 
 const char * reg_names[] = REGISTER_NAMES;
+
+/* Array containing all of the register class names.  */
+
+const char * reg_class_names[] = REG_CLASS_NAMES;
 
 /* For each hard register, the widest mode object that it can contain.
    This will be a MODE_INT mode if the register can hold integers.  Otherwise
@@ -293,13 +306,17 @@ init_reg_sets (void)
   memcpy (call_used_regs, initial_call_used_regs, sizeof call_used_regs);
   memset (global_regs, 0, sizeof global_regs);
 
-  /* Do any additional initialization regsets may need.  */
-  INIT_ONCE_REG_SET ();
-
 #ifdef REG_ALLOC_ORDER
   for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
     inv_reg_alloc_order[reg_alloc_order[i]] = i;
 #endif
+
+/* APPLE LOCAL begin ARM add DIMODE_REG_ALLOC_ORDER */
+#ifdef DIMODE_REG_ALLOC_ORDER
+  for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
+    dimode_inv_reg_alloc_order[dimode_reg_alloc_order[i]] = i;
+#endif
+/* APPLE LOCAL end ARM add DIMODE_REG_ALLOC_ORDER */
 }
 
 /* After switches have been processed, which perhaps alter
@@ -837,7 +854,10 @@ struct costs
 /* Structure used to record preferences of given pseudo.  */
 struct reg_pref
 {
-  /* (enum reg_class) prefclass is the preferred class.  */
+  /* APPLE LOCAL begin 3501055 etc */
+  /* (enum reg_class) prefclass is the preferred class.  May be
+     NO_REGS if no class is better than memory.  */
+  /* APPLE LOCAL end 3501055 etc */
   char prefclass;
 
   /* altclass is a register class that we should use for allocating
@@ -928,7 +948,6 @@ regclass_init (void)
 static void
 dump_regclass (FILE *dump)
 {
-  static const char *const reg_class_names[] = REG_CLASS_NAMES;
   int i;
   for (i = FIRST_PSEUDO_REGISTER; i < max_regno; i++)
     {
@@ -1321,6 +1340,12 @@ regclass (rtx f, int nregs, FILE *dump)
 		best = reg_class_subunion[(int) best][class];
 	    }
 
+	  /* APPLE LOCAL begin 3501055 etc */
+	  /* If no register class is better than memory, use memory. */
+	  if (p->mem_cost < best_cost)
+	    best = NO_REGS;
+	  /* APPLE LOCAL end 3501055 etc */
+
 	  /* Record the alternate register class; i.e., a class for which
 	     every register in it is better than using memory.  If adding a
 	     class would make a smaller class (i.e., no union of just those
@@ -1351,7 +1376,6 @@ regclass (rtx f, int nregs, FILE *dump)
 	      && (reg_pref[i].prefclass != (int) best
 		  || reg_pref[i].altclass != (int) alt))
 	    {
-	      static const char *const reg_class_names[] = REG_CLASS_NAMES;
 	      fprintf (dump, "  Register %i", i);
 	      if (alt == ALL_REGS || best == ALL_REGS)
 		fprintf (dump, " pref %s\n", reg_class_names[(int) best]);
@@ -1529,7 +1553,8 @@ record_reg_classes (int n_alts, int n_ops, rtx *ops,
 		     to what we would add if this register were not in the
 		     appropriate class.  */
 
-		  if (reg_pref)
+		  /* APPLE LOCAL 3501055 etc */
+		  if (reg_pref && reg_pref[REGNO (op)].prefclass != NO_REGS)
 		    alt_cost
 		      += (may_move_in_cost[mode]
 			  [(unsigned char) reg_pref[REGNO (op)].prefclass]
@@ -1628,7 +1653,8 @@ record_reg_classes (int n_alts, int n_ops, rtx *ops,
 		    break;
 		case 'i':
 		  if (CONSTANT_P (op)
-		      && (! flag_pic || LEGITIMATE_PIC_OPERAND_P (op)))
+		      /* APPLE LOCAL ARM -mdynamic-no-pic support */
+		      && LEGITIMATE_INDIRECT_OPERAND_P (op))
 		    win = 1;
 		  break;
 
@@ -1659,7 +1685,8 @@ record_reg_classes (int n_alts, int n_ops, rtx *ops,
 		case 'g':
 		  if (MEM_P (op)
 		      || (CONSTANT_P (op)
-			  && (! flag_pic || LEGITIMATE_PIC_OPERAND_P (op))))
+			  /* APPLE LOCAL ARM -mdynamic-no-pic support */
+			  && LEGITIMATE_INDIRECT_OPERAND_P (op)))
 		    win = 1;
 		  allows_mem[i] = 1;
 		case 'r':
@@ -1755,7 +1782,8 @@ record_reg_classes (int n_alts, int n_ops, rtx *ops,
 		     to what we would add if this register were not in the
 		     appropriate class.  */
 
-		  if (reg_pref)
+		  /* APPLE LOCAL 3501055 etc */
+		  if (reg_pref && reg_pref[REGNO (op)].prefclass != NO_REGS)
 		    alt_cost
 		      += (may_move_in_cost[mode]
 			  [(unsigned char) reg_pref[REGNO (op)].prefclass]
@@ -1841,7 +1869,10 @@ record_reg_classes (int n_alts, int n_ops, rtx *ops,
 	  int class;
 	  unsigned int nr;
 
-	  if (regno >= FIRST_PSEUDO_REGISTER && reg_pref != 0)
+	  /* APPLE LOCAL begin 3501055 etc */
+	  if (regno >= FIRST_PSEUDO_REGISTER && reg_pref != 0
+	      && reg_pref[regno].prefclass != NO_REGS)
+	  /* APPLE LOCAL end 3501055 etc */
 	    {
 	      enum reg_class pref = reg_pref[regno].prefclass;
 
@@ -2181,7 +2212,6 @@ allocate_reg_info (size_t num_regs, int new_p, int renumber_p)
 	  reg_pref_buffer = xmalloc (regno_allocated
 				     * sizeof (struct reg_pref));
 	}
-
       else
 	{
 	  VARRAY_GROW (reg_n_info, regno_allocated);
@@ -2257,9 +2287,6 @@ allocate_reg_info (size_t num_regs, int new_p, int renumber_p)
 
   if (renumber_p)
     reg_renumber = renumber;
-
-  /* Tell the regset code about the new number of registers.  */
-  MAX_REGNO_REG_SET (num_regs, new_p, renumber_p);
 }
 
 /* Free up the space allocated by allocate_reg_info.  */
@@ -2310,7 +2337,7 @@ int max_parallel;
 static int max_set_parallel;
 
 void
-reg_scan (rtx f, unsigned int nregs, int repeat ATTRIBUTE_UNUSED)
+reg_scan (rtx f, unsigned int nregs)
 {
   rtx insn;
 
@@ -2581,14 +2608,6 @@ reg_classes_intersect_p (enum reg_class c1, enum reg_class c2)
 
  lose:
   return 0;
-}
-
-/* Release any memory allocated by register sets.  */
-
-void
-regset_release_memory (void)
-{
-  bitmap_release_memory ();
 }
 
 #ifdef CANNOT_CHANGE_MODE_CLASS

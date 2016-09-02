@@ -100,6 +100,7 @@ sources = \
 	pool_allocator.cc \
 	mt_allocator.cc \
 	codecvt.cc \
+	compatibility.cc \
 	complex_io.cc \
 	ctype.cc \
 	debug.cc \
@@ -126,12 +127,14 @@ sources = \
 	ext-inst.cc \
 	io-inst.cc \
 	istream-inst.cc \
+	istream.cc \
 	locale-inst.cc \
 	locale-misc-inst.cc \
 	misc-inst.cc \
 	ostream-inst.cc \
 	sstream-inst.cc \
 	streambuf-inst.cc \
+	streambuf.cc \
 	string-inst.cc \
 	valarray-inst.cc \
 	wlocale-inst.cc \

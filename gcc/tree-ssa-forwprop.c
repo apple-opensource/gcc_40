@@ -1,5 +1,5 @@
 /* Forward propagation of single use variables.
-   Copyright (C) 2004 Free Software Foundation, Inc.
+   Copyright (C) 2004, 2005 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -329,7 +329,6 @@ substitute_single_use_vars (varray_type *cond_worklist,
       tree def = SSA_NAME_DEF_STMT (test_var);
       dataflow_t df;
       int j, num_uses, propagated_uses;
-      block_stmt_iterator bsi;
 
       VARRAY_POP (vars_worklist);
 
@@ -367,8 +366,19 @@ substitute_single_use_vars (varray_type *cond_worklist,
 	  if (TREE_CODE (cond_stmt) != COND_EXPR) 
 	    continue;
 
+	  /* APPLE LOCAL begin 4349512 */
 	  cond = COND_EXPR_COND (cond_stmt);
 	  cond_code = TREE_CODE (cond);
+
+	  /* Make sure the conditional has one of the forms we're expecting. */
+	  if (! (cond_code == SSA_NAME
+	         || ((cond_code == EQ_EXPR || cond_code == NE_EXPR)
+		      && TREE_CODE (TREE_OPERAND (cond, 0)) == SSA_NAME
+		      && CONSTANT_CLASS_P (TREE_OPERAND (cond, 1))
+		      && INTEGRAL_TYPE_P (TREE_TYPE (TREE_OPERAND (cond, 1))))))
+	    continue;
+	  /* APPLE LOCAL end 4349512 */
+
 	  def_rhs = TREE_OPERAND (def, 1);
 	  def_rhs_code = TREE_CODE (def_rhs);
 
@@ -466,16 +476,10 @@ substitute_single_use_vars (varray_type *cond_worklist,
 	 Unfortunately, we have to find the defining statement in
 	 whatever block it might be in.  */
       if (num_uses && num_uses == propagated_uses)
-	for (bsi = bsi_start (bb_for_stmt (def));
-	     !bsi_end_p (bsi);
-	     bsi_next (&bsi))
-	  {
-	    if (def == bsi_stmt (bsi))
-	      {
-		bsi_remove (&bsi);
-		break;
-	      }
-	  }
+	{
+	  block_stmt_iterator bsi = bsi_for_stmt (def);
+	  bsi_remove (&bsi);
+	}
     }
 }
 
@@ -570,6 +574,9 @@ all_uses_are_replacable (tree stmt, bool replace)
   int j, num_uses;
   bool replacable = true;
 
+  if (!cast_conversion_assignment_p (stmt))
+    return false;
+
   /* Now compute the immediate uses of TEST_VAR.  */
   df = get_immediate_uses (stmt);
   num_uses = num_immediate_uses (df);
@@ -612,6 +619,7 @@ all_uses_are_replacable (tree stmt, bool replace)
 		       == TYPE_MAIN_VARIANT (use_lhs_type)))
 	      {
 		TREE_OPERAND (use, 1) = TREE_OPERAND (def_rhs, 0);
+		fold_stmt (&use);
 		modify_stmt (use);
 	      }
 	    }
@@ -627,6 +635,7 @@ all_uses_are_replacable (tree stmt, bool replace)
 	      if (new_cond)
 		{
 		  COND_EXPR_COND (use) = new_cond;
+		  fold_stmt (&use);
 		  modify_stmt (use);
 		}
 	      else
@@ -651,7 +660,7 @@ eliminate_unnecessary_casts (void)
   varray_type worklist;
 
   /* Memory allocation.  */
-  vars = BITMAP_XMALLOC ();
+  vars = BITMAP_ALLOC (NULL);
   VARRAY_TREE_INIT (worklist, 10, "worklist");
   FOR_EACH_BB (bb)
     {
@@ -701,7 +710,7 @@ eliminate_unnecessary_casts (void)
     }
   /* Cleanup */
   free_df ();
-  BITMAP_XFREE (vars);
+  BITMAP_FREE (vars);
 }
 
 /* APPLE LOCAL end cast removal.  */
@@ -714,10 +723,11 @@ tree_ssa_forward_propagate_single_use_vars (void)
   basic_block bb;
   varray_type vars_worklist, cond_worklist;
 
-  /* APPLE LOCAL cast removal.  */
+  /* APPLE LOCAL begin cast removal.  */
   eliminate_unnecessary_casts ();
+  /* APPLE LOCAL end cast removal.  */
 
-  vars = BITMAP_XMALLOC ();
+  vars = BITMAP_ALLOC (NULL);
   VARRAY_TREE_INIT (vars_worklist, 10, "VARS worklist");
   VARRAY_TREE_INIT (cond_worklist, 10, "COND worklist");
 
@@ -759,7 +769,7 @@ tree_ssa_forward_propagate_single_use_vars (void)
     }
 
   /* All done.  Clean up.  */
-  BITMAP_XFREE (vars);
+  BITMAP_FREE (vars);
 }
 
 

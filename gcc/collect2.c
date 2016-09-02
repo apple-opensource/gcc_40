@@ -1,7 +1,7 @@
 /* Collect static initialization info into data structures that can be
    traversed by C++ initialization and finalization routines.
    Copyright (C) 1992, 1993, 1994, 1995, 1996, 1997, 1998,
-   1999, 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+   1999, 2000, 2001, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
    Contributed by Chris Smith (csmith@convex.com).
    Heavily modified by Michael Meissner (meissner@cygnus.com),
    Per Bothner (bothner@cygnus.com), and John Gilmore (gnu@cygnus.com).
@@ -66,7 +66,9 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
    the utilities are not correct for a cross-compiler; we have to hope that
    cross-versions are in the proper directories.  */
 
-#ifdef CROSS_COMPILE
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#ifdef CROSS_DIRECTORY_STRUCTURE
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
 #undef OBJECT_FORMAT_COFF
 #undef MD_EXEC_PREFIX
 #undef REAL_LD_FILE_NAME
@@ -185,6 +187,7 @@ static const char *demangle_flag;
 #ifdef COLLECT_EXPORT_LIST
 static int export_flag;                 /* true if -bE */
 static int aix64_flag;			/* true if -b64 */
+static int aixrtl_flag;			/* true if -brtl */
 #endif
 
 int debug;				/* true if -debug */
@@ -242,7 +245,6 @@ static struct path_prefix cmdline_lib_dirs; /* directories specified with -L */
 static struct path_prefix libpath_lib_dirs; /* directories in LIBPATH */
 static struct path_prefix *libpaths[3] = {&cmdline_lib_dirs,
 					  &libpath_lib_dirs, NULL};
-static const char *const libexts[3] = {"a", "so", NULL};  /* possible library extensions */
 #endif
 
 static void handler (int);
@@ -337,26 +339,26 @@ collect_exit (int status)
 
 /* Notify user of a non-error.  */
 void
-notice (const char *msgid, ...)
+notice (const char *cmsgid, ...)
 {
   va_list ap;
 
-  va_start (ap, msgid);
-  vfprintf (stderr, _(msgid), ap);
+  va_start (ap, cmsgid);
+  vfprintf (stderr, _(cmsgid), ap);
   va_end (ap);
 }
 
 /* Die when sys call fails.  */
 
 void
-fatal_perror (const char * msgid, ...)
+fatal_perror (const char * cmsgid, ...)
 {
   int e = errno;
   va_list ap;
 
-  va_start (ap, msgid);
+  va_start (ap, cmsgid);
   fprintf (stderr, "collect2: ");
-  vfprintf (stderr, _(msgid), ap);
+  vfprintf (stderr, _(cmsgid), ap);
   fprintf (stderr, ": %s\n", xstrerror (e));
   va_end (ap);
 
@@ -366,13 +368,13 @@ fatal_perror (const char * msgid, ...)
 /* Just die.  */
 
 void
-fatal (const char * msgid, ...)
+fatal (const char * cmsgid, ...)
 {
   va_list ap;
 
-  va_start (ap, msgid);
+  va_start (ap, cmsgid);
   fprintf (stderr, "collect2: ");
-  vfprintf (stderr, _(msgid), ap);
+  vfprintf (stderr, _(cmsgid), ap);
   fprintf (stderr, "\n");
   va_end (ap);
 
@@ -382,13 +384,13 @@ fatal (const char * msgid, ...)
 /* Write error message.  */
 
 void
-error (const char * msgid, ...)
+error (const char * gmsgid, ...)
 {
   va_list ap;
 
-  va_start (ap, msgid);
+  va_start (ap, gmsgid);
   fprintf (stderr, "collect2: ");
-  vfprintf (stderr, _(msgid), ap);
+  vfprintf (stderr, _(gmsgid), ap);
   fprintf (stderr, "\n");
   va_end(ap);
 }
@@ -579,7 +581,9 @@ is_ctor_dtor (const char *s)
 
 static struct path_prefix cpath, path;
 
-#ifdef CROSS_COMPILE
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#ifdef CROSS_DIRECTORY_STRUCTURE
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
 /* This is the name of the target machine.  We use it to form the name
    of the files to execute.  */
 
@@ -772,7 +776,9 @@ main (int argc, char **argv)
   static const char *const strip_suffix = "strip";
   static const char *const gstrip_suffix = "gstrip";
 
-#ifdef CROSS_COMPILE
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#ifdef CROSS_DIRECTORY_STRUCTURE
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
   /* If we look for a program in the compiler directories, we just use
      the short name, since these directories are already system-specific.
      But it we look for a program in the system directories, we need to
@@ -801,8 +807,10 @@ main (int argc, char **argv)
 #endif
   const char *const full_strip_suffix	= strip_suffix;
   const char *const full_gstrip_suffix	= gstrip_suffix;
-#endif /* CROSS_COMPILE */
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#endif /* CROSS_DIRECTORY_STRUCTURE */
 
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
   const char *arg;
   FILE *outf;
 #ifdef COLLECT_EXPORT_LIST
@@ -836,6 +844,9 @@ main (int argc, char **argv)
      receive the signal.  A different setting is inheritable */
   signal (SIGCHLD, SIG_DFL);
 #endif
+
+  /* Unlock the stdio streams.  */
+  unlock_std_streams ();
 
   gcc_init_libintl ();
 
@@ -980,7 +991,9 @@ main (int argc, char **argv)
   c_file_name = getenv ("COLLECT_GCC");
   if (c_file_name == 0)
     {
-#ifdef CROSS_COMPILE
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#ifdef CROSS_DIRECTORY_STRUCTURE
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
       c_file_name = concat (target_machine, "-gcc", NULL);
 #else
       c_file_name = "gcc";
@@ -1087,6 +1100,8 @@ main (int argc, char **argv)
                 export_flag = 1;
 	      else if (arg[2] == '6' && arg[3] == '4')
 		aix64_flag = 1;
+	      else if (arg[2] == 'r' && arg[3] == 't' && arg[4] == 'l')
+		aixrtl_flag = 1;
 	      break;
 #endif
 
@@ -1096,6 +1111,11 @@ main (int argc, char **argv)
 		  /* Already parsed.  */
 		  ld1--;
 		  ld2--;
+		}
+	      if (!strcmp (arg, "-dynamic-linker") && argv[1])
+	        {
+		  ++argv;
+		  *ld1++ = *ld2++ = *argv;
 		}
 	      break;
 
@@ -1562,7 +1582,7 @@ collect_execute (const char *prog, char **argv, const char *redir)
      since we might not end up needing something that we could not find.  */
 
   if (argv[0] == 0)
-    fatal ("cannot find `%s'", prog);
+    fatal ("cannot find '%s'", prog);
 
   if (redir)
     {
@@ -2039,7 +2059,7 @@ scan_prog_file (const char *prog_name, enum pass which_pass)
 
   /* If we do not have an `nm', complain.  */
   if (nm_file_name == 0)
-    fatal ("cannot find `nm'");
+    fatal ("cannot find 'nm'");
 
   nm_argv[argc++] = nm_file_name;
   if (NM_FLAGS[0] != '\0')
@@ -2206,7 +2226,7 @@ scan_libraries (const char *prog_name)
   /* If we do not have an `ldd', complain.  */
   if (ldd_file_name == 0)
     {
-      error ("cannot find `ldd'");
+      error ("cannot find 'ldd'");
       return;
     }
 
@@ -2594,6 +2614,8 @@ resolve_lib_name (const char *name)
 {
   char *lib_buf;
   int i, j, l = 0;
+  /* Library extensions for AIX dynamic linking.  */
+  const char * const libexts[2] = {"a", "so"};
 
   for (i = 0; libpaths[i]; i++)
     if (libpaths[i]->max_len > l)
@@ -2612,14 +2634,15 @@ resolve_lib_name (const char *name)
 	  const char *p = "";
 	  if (list->prefix[strlen(list->prefix)-1] != '/')
 	    p = "/";
-	  for (j = 0; libexts[j]; j++)
+	  for (j = 0; j < 2; j++)
 	    {
 	      sprintf (lib_buf, "%s%slib%s.%s",
-		       list->prefix, p, name, libexts[j]);
-if (debug) fprintf (stderr, "searching for: %s\n", lib_buf);
+		       list->prefix, p, name,
+		       libexts[(j + aixrtl_flag) % 2]);
+	      if (debug) fprintf (stderr, "searching for: %s\n", lib_buf);
 	      if (file_exists (lib_buf))
 		{
-if (debug) fprintf (stderr, "found: %s\n", lib_buf);
+		  if (debug) fprintf (stderr, "found: %s\n", lib_buf);
 		  return (lib_buf);
 		}
 	    }

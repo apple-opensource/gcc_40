@@ -1,6 +1,6 @@
 /* Compilation switch flag definitions for GCC.
    Copyright (C) 1987, 1988, 1994, 1995, 1996, 1997, 1998, 1999, 2000, 2002,
-   2003, 2004
+   2003, 2004, 2005
    Free Software Foundation, Inc.
 
 This file is part of GCC.
@@ -82,14 +82,8 @@ struct visibility_flags
 /* Global visibility options.  */
 extern struct visibility_flags visibility_options;
 
-/* Nonzero means do optimizations.  -opt.  */
-
-extern int optimize;
-
-/* Nonzero means optimize for size.  -Os.  */
-
-extern int optimize_size;
-
+/* APPLE LOCAL begin optimization pragmas 3124235/3420242 */
+/* APPLE LOCAL end optimization pragmas 3124235/3420242 */
 /* Do print extra warnings (such as for uninitialized variables).
    -W/-Wextra.  */
 
@@ -143,18 +137,18 @@ extern int flag_short_enums;
 
 extern int flag_pcc_struct_return;
 
-/* APPLE LOCAL begin fwritable-strings  */
+/* APPLE LOCAL begin fwritable strings  */
 /* Nonzero for -fwritable-strings:
    store string constants in data segment and don't uniquize them.  */
 
 extern int flag_writable_strings;
-/* APPLE LOCAL end fwritable-strings  */
+/* APPLE LOCAL end fwritable strings  */
 
 /* 0 means straightforward implementation of complex divide acceptable.
    1 means wide ranges of inputs must work for complex divide.
-   2 means C99-like requirements for complex divide (not yet implemented).  */
+   2 means C99-like requirements for complex multiply and divide.  */
 
-extern int flag_complex_divide_method;
+extern int flag_complex_method;
 
 /* APPLE LOCAL begin -fobey-inline */
 /* Nonzero for -fobey-inline: 'inline' keyword must be obeyed, regardless
@@ -228,9 +222,13 @@ extern bool g_switch_set;
    of two not less than the variable, for .align output.  */
 
 extern int align_loops_log;
-extern int align_loops_max_skip;
+/* APPLE LOCAL begin optimization pragmas 4760857*/
+/* remove align_loops_max_skip */
+/* APPLE LOCAL end optimization pragmas 4760857*/
 extern int align_jumps_log;
-extern int align_jumps_max_skip;
+/* APPLE LOCAL begin optimization pragmas 4760857*/
+/* remove align_jumps_max_skip */
+/* APPLE LOCAL end optimization pragmas 4760857*/
 extern int align_labels_log;
 extern int align_labels_max_skip;
 extern int align_functions_log;
@@ -312,19 +310,28 @@ extern int flag_fastf;
 extern int flag_fastcp;
 /* APPLE LOCAL end -fast or -fastf or -fastcp */
 
-/* APPLE LOCAL gdb only used symbols */
+/* APPLE LOCAL begin gdb only used symbols */
 #ifdef DBX_ONLY_USED_SYMBOLS
 /* Nonzero if generating debugger info for used symbols only.  */
 extern int flag_debug_only_used_symbols;
 #endif
+/* APPLE LOCAL end gdb only used symbols */
 
 /* APPLE LOCAL begin predictive compilation */
 extern int predictive_compilation;
 /* APPLE LOCAL end predictive compilation */
 
+/* APPLE LOCAL begin disable_typechecking_for_spec_flag */
 extern int disable_typechecking_for_spec_flag;
+/* APPLE LOCAL end disable_typechecking_for_spec_flag */
 
-/* APPLE LOCAL Altivec */
+/* APPLE LOCAL begin Altivec */
 extern int flag_disable_opts_for_faltivec;
+/* APPLE LOCAL end Altivec */
+
+/* APPLE LOCAL begin ss2 */
+extern int flag_pch_file;
+extern int flag_save_repository;
+/* APPLE LOCAL end ss2 */
 
 #endif /* ! GCC_FLAGS_H */

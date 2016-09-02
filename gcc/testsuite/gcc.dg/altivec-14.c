@@ -1,6 +1,6 @@
-/* { dg-do compile { target powerpc-*-* } } */
+/* APPLE LOCAL ppc32 only */
+/* { dg-do compile { target { powerpc*-*-* && ilp32 } } } */
 /* { dg-xfail-if "" { "powerpc-ibm-aix*" } { "-maltivec" } { "" } } */
-/* { dg-xfail-if "" { "powerpc-*-*" } { "-m64" } { "" } } */
 /* { dg-options "-maltivec" } */
 
 #include <altivec.h>

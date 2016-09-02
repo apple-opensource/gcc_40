@@ -77,14 +77,6 @@ using namespace __cxxabiv1;
 # define EMERGENCY_OBJ_COUNT	4
 #endif
 
-/* APPLE LOCAL begin reduce emergency buffer size */
-/* 256 bytes is more than large enough for an std::bad_alloc object */
-#undef EMERGENCY_OBJ_SIZE
-#undef EMERGENCY_OBJ_COUNT
-#define EMERGENCY_OBJ_SIZE 256
-#define EMERGENCY_OBJ_COUNT 2
-/* APPLE LOCAL end reduce emergency buffer size */
-
 #if INT_MAX == 32767 || EMERGENCY_OBJ_COUNT <= 32
 typedef unsigned int bitmask_type;
 #else
@@ -154,6 +146,12 @@ __cxxabiv1::__cxa_allocate_exception(std::size_t thrown_size) throw()
       if (!ret)
 	std::terminate ();
     }
+
+  // We have an uncaught exception as soon as we allocate memory.  This
+  // yields uncaught_exception() true during the copy-constructor that
+  // initializes the exception object.  See Issue 475.
+  __cxa_eh_globals *globals = __cxa_get_globals ();
+  globals->uncaughtExceptions += 1;
 
   memset (ret, 0, sizeof (__cxa_exception));
 

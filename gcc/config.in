@@ -79,6 +79,9 @@
    this is either `int' or `gid_t'. */
 #undef GETGROUPS_T
 
+/* mcontext_t fields start with __ */
+#undef HAS_MCONTEXT_T_UNDERSCORES
+
 /* Define to 1 if you have the `alphasort' function. */
 #undef HAVE_ALPHASORT
 
@@ -100,6 +103,9 @@
 
 /* Define if your assembler supports the Sun syntax for cmov. */
 #undef HAVE_AS_IX86_CMOV_SUN_SYNTAX
+
+/* Define if your assembler supports the lituse_jsrdirect relocation. */
+#undef HAVE_AS_JSRDIRECT_RELOCS
 
 /* Define if your assembler supports .sleb128 and .uleb128. */
 #undef HAVE_AS_LEB128
@@ -139,6 +145,9 @@
 /* Define to 1 if you have the `atoq' function. */
 #undef HAVE_ATOQ
 
+/* Define to 1 if you have the `clearerr_unlocked' function. */
+#undef HAVE_CLEARERR_UNLOCKED
+
 /* Define to 1 if you have the `clock' function. */
 #undef HAVE_CLOCK
 
@@ -148,6 +157,10 @@
 /* Define to 1 if we found a declaration for 'abort', otherwise define to 0.
    */
 #undef HAVE_DECL_ABORT
+
+/* Define to 1 if we found a declaration for 'asprintf', otherwise define to
+   0. */
+#undef HAVE_DECL_ASPRINTF
 
 /* Define to 1 if we found a declaration for 'atof', otherwise define to 0. */
 #undef HAVE_DECL_ATOF
@@ -163,6 +176,10 @@
    */
 #undef HAVE_DECL_CALLOC
 
+/* Define to 1 if we found a declaration for 'clearerr_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_CLEARERR_UNLOCKED
+
 /* Define to 1 if we found a declaration for 'clock', otherwise define to 0.
    */
 #undef HAVE_DECL_CLOCK
@@ -171,13 +188,45 @@
    */
 #undef HAVE_DECL_ERRNO
 
+/* Define to 1 if we found a declaration for 'feof_unlocked', otherwise define
+   to 0. */
+#undef HAVE_DECL_FEOF_UNLOCKED
+
+/* Define to 1 if we found a declaration for 'ferror_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_FERROR_UNLOCKED
+
+/* Define to 1 if we found a declaration for 'fflush_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_FFLUSH_UNLOCKED
+
+/* Define to 1 if we found a declaration for 'fgetc_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_FGETC_UNLOCKED
+
+/* Define to 1 if we found a declaration for 'fgets_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_FGETS_UNLOCKED
+
+/* Define to 1 if we found a declaration for 'fileno_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_FILENO_UNLOCKED
+
 /* Define to 1 if we found a declaration for 'fprintf_unlocked', otherwise
    define to 0. */
 #undef HAVE_DECL_FPRINTF_UNLOCKED
 
+/* Define to 1 if we found a declaration for 'fputc_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_FPUTC_UNLOCKED
+
 /* Define to 1 if we found a declaration for 'fputs_unlocked', otherwise
    define to 0. */
 #undef HAVE_DECL_FPUTS_UNLOCKED
+
+/* Define to 1 if we found a declaration for 'fread_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_FREAD_UNLOCKED
 
 /* Define to 1 if we found a declaration for 'free', otherwise define to 0. */
 #undef HAVE_DECL_FREE
@@ -186,9 +235,17 @@
    define to 0. */
 #undef HAVE_DECL_FWRITE_UNLOCKED
 
+/* Define to 1 if we found a declaration for 'getchar_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_GETCHAR_UNLOCKED
+
 /* Define to 1 if we found a declaration for 'getcwd', otherwise define to 0.
    */
 #undef HAVE_DECL_GETCWD
+
+/* Define to 1 if we found a declaration for 'getc_unlocked', otherwise define
+   to 0. */
+#undef HAVE_DECL_GETC_UNLOCKED
 
 /* Define to 1 if we found a declaration for 'getenv', otherwise define to 0.
    */
@@ -222,6 +279,10 @@
    */
 #undef HAVE_DECL_MALLOC
 
+/* Define to 1 if we found a declaration for 'putchar_unlocked', otherwise
+   define to 0. */
+#undef HAVE_DECL_PUTCHAR_UNLOCKED
+
 /* Define to 1 if we found a declaration for 'putc_unlocked', otherwise define
    to 0. */
 #undef HAVE_DECL_PUTC_UNLOCKED
@@ -237,6 +298,10 @@
    0. */
 #undef HAVE_DECL_SETRLIMIT
 
+/* Define to 1 if we found a declaration for 'sigaltstack', otherwise define
+   to 0. */
+#undef HAVE_DECL_SIGALTSTACK
+
 /* Define to 1 if we found a declaration for 'snprintf', otherwise define to
    0. */
 #undef HAVE_DECL_SNPRINTF
@@ -248,6 +313,10 @@
 /* Define to 1 if we found a declaration for 'strstr', otherwise define to 0.
    */
 #undef HAVE_DECL_STRSTR
+
+/* Define to 1 if we found a declaration for 'strverscmp', otherwise define to
+   0. */
+#undef HAVE_DECL_STRVERSCMP
 
 /* Define to 1 if we found a declaration for 'times', otherwise define to 0.
    */
@@ -266,6 +335,24 @@
 /* Define to 1 if you have the <fcntl.h> header file. */
 #undef HAVE_FCNTL_H
 
+/* Define to 1 if you have the `feof_unlocked' function. */
+#undef HAVE_FEOF_UNLOCKED
+
+/* Define to 1 if you have the `ferror_unlocked' function. */
+#undef HAVE_FERROR_UNLOCKED
+
+/* Define to 1 if you have the `fflush_unlocked' function. */
+#undef HAVE_FFLUSH_UNLOCKED
+
+/* Define to 1 if you have the `fgetc_unlocked' function. */
+#undef HAVE_FGETC_UNLOCKED
+
+/* Define to 1 if you have the `fgets_unlocked' function. */
+#undef HAVE_FGETS_UNLOCKED
+
+/* Define to 1 if you have the `fileno_unlocked' function. */
+#undef HAVE_FILENO_UNLOCKED
+
 /* Define to 1 if you have the `fork' function. */
 #undef HAVE_FORK
 
@@ -277,6 +364,9 @@
 
 /* Define to 1 if you have the `fputs_unlocked' function. */
 #undef HAVE_FPUTS_UNLOCKED
+
+/* Define to 1 if you have the `fread_unlocked' function. */
+#undef HAVE_FREAD_UNLOCKED
 
 /* Define to 1 if you have the `fwrite_unlocked' function. */
 #undef HAVE_FWRITE_UNLOCKED
@@ -293,9 +383,15 @@
 /* Define if your assembler and linker support .hidden. */
 #undef HAVE_GAS_HIDDEN
 
+/* Define if your assembler supports .literal16. */
+#undef HAVE_GAS_LITERAL16
+
 /* Define if your assembler supports specifying the maximum number of bytes to
    skip when using the GAS .p2align command. */
 #undef HAVE_GAS_MAX_SKIP_P2ALIGN
+
+/* Define if your assembler supports .nsubspa comdat option. */
+#undef HAVE_GAS_NSUBSPA_COMDAT
 
 /* Define if your assembler and linker support 32-bit section relative relocs
    via '.secrel32 label'. */
@@ -311,6 +407,12 @@
 
 /* Define if your assembler supports .weak. */
 #undef HAVE_GAS_WEAK
+
+/* Define to 1 if you have the `getchar_unlocked' function. */
+#undef HAVE_GETCHAR_UNLOCKED
+
+/* Define to 1 if you have the `getc_unlocked' function. */
+#undef HAVE_GETC_UNLOCKED
 
 /* Define to 1 if you have the `getrlimit' function. */
 #undef HAVE_GETRLIMIT
@@ -367,6 +469,9 @@
    a read-write section. */
 #undef HAVE_LD_RO_RW_SECTION_MIXING
 
+/* Define if your linker supports -Bstatic/-Bdynamic option. */
+#undef HAVE_LD_STATIC_DYNAMIC
+
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
 
@@ -411,6 +516,9 @@
 
 /* Define if printf supports "%p". */
 #undef HAVE_PRINTF_PTR
+
+/* Define to 1 if you have the `putchar_unlocked' function. */
+#undef HAVE_PUTCHAR_UNLOCKED
 
 /* Define to 1 if you have the `putc_unlocked' function. */
 #undef HAVE_PUTC_UNLOCKED
@@ -578,10 +686,6 @@
 
 /* Define if your assembler mis-optimizes .eh_frame data. */
 #undef USE_AS_TRADITIONAL_FORMAT
-
-/* Define to 1 if the 'long long' (or '__int64') is wider than 'long' but
-   still efficiently supported by the host hardware. */
-#undef USE_LONG_LONG_FOR_WIDEST_FAST_INT
 
 /* Define to 1 if the 'long long' (or '__int64') is wider than 'long' but
    still efficiently supported by the host hardware. */

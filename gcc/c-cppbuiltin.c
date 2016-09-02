@@ -1,5 +1,5 @@
 /* Define builtin-in macros for the C family front ends.
-   Copyright (C) 2002, 2003, 2004 Free Software Foundation, Inc.
+   Copyright (C) 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -219,14 +219,12 @@ builtin_define_float_constants (const char *name_prefix, const char *fp_suffix, 
   /* The difference between 1 and the least value greater than 1 that is
      representable in the given floating point type, b**(1-p).  */
   sprintf (name, "__%s_EPSILON__", name_prefix);
-  /* APPLE LOCAL begin put in 4.1 */
   if (fmt->pnan < fmt->p)
     /* This is an IBM extended double format, so 1.0 + any double is
        representable precisely.  */
       sprintf (buf, "0x1p%d", (fmt->emin - fmt->p) * fmt->log2_b);
     else      
       sprintf (buf, "0x1p%d", (1 - fmt->p) * fmt->log2_b);
-  /* APPLE LOCAL end put in 4.1 */
   builtin_define_with_hex_fp_value (name, type, decimal_dig, buf, fp_suffix);
 
   /* For C++ std::numeric_limits<T>::denorm_min.  The minimum denormalized
@@ -277,7 +275,7 @@ define__GNUC__ (void)
   if (c_dialect_cxx ())
     builtin_define_with_value_n ("__GNUG__", q, v - q);
 
-  gcc_assert (*v == '.' || ISDIGIT (v[1]));
+  gcc_assert (*v == '.' && ISDIGIT (v[1]));
   
   q = ++v;
   while (ISDIGIT (*v))
@@ -380,7 +378,7 @@ c_cpp_builtins (cpp_reader *pfile)
        different from system to system.  */
     builtin_define_with_int_value ("__GXX_ABI_VERSION", 999999);
   else if (flag_abi_version == 1)
-    /* Due to an historical accident, this version had the value
+    /* Due to a historical accident, this version had the value
        "102".  */
     builtin_define_with_int_value ("__GXX_ABI_VERSION", 102);
   else
@@ -420,6 +418,13 @@ c_cpp_builtins (cpp_reader *pfile)
 
   /* Misc.  */
   builtin_define_with_value ("__VERSION__", version_string, 1);
+
+  /* APPLE LOCAL begin mainline */
+  if (flag_gnu89_inline)
+    cpp_define (pfile, "__GNUC_GNU_INLINE__");
+  else
+    cpp_define (pfile, "__GNUC_STDC_INLINE__");
+  /* APPLE LOCAL end mainline */
 
   /* Definitions for LP64 model.  */
   if (TYPE_PRECISION (long_integer_type_node) == 64
@@ -467,6 +472,15 @@ c_cpp_builtins (cpp_reader *pfile)
 
   if (targetm.handle_pragma_extern_prefix)
     cpp_define (pfile, "__PRAGMA_EXTERN_PREFIX");
+  /* APPLE LOCAL begin mainline */
+  /* Make the choice of the stack protector runtime visible to source code.
+     The macro names and values here were chosen for compatibility with an
+     earlier implementation, i.e. ProPolice.  */
+  if (flag_stack_protect == 2)
+    cpp_define (pfile, "__SSP_ALL__=2");
+  else if (flag_stack_protect == 1)
+    cpp_define (pfile, "__SSP__=1");
+  /* APPLE LOCAL end mainline */
 
   /* A straightforward target hook doesn't work, because of problems
      linking that hook's body when part of non-C front ends.  */

@@ -1,5 +1,5 @@
 /* Default target hook functions.
-   Copyright (C) 2003, 2004 Free Software Foundation, Inc.
+   Copyright (C) 2003, 2004, 2005 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -24,6 +24,8 @@ extern enum machine_mode default_cc_modes_compatible (enum machine_mode,
 						      enum machine_mode);
 
 extern bool default_return_in_memory (tree, tree);
+/* APPLE LOCAL radar 4781080 */
+extern bool default_objc_fpreturn_msgcall (tree, bool);
 
 extern rtx default_expand_builtin_saveregs (void);
 extern void default_setup_incoming_varargs (CUMULATIVE_ARGS *, enum machine_mode, tree, int *, int);
@@ -36,6 +38,11 @@ extern bool default_skip_vec_args (tree, int, int*);
 extern enum machine_mode default_eh_return_filter_mode (void);
 extern unsigned HOST_WIDE_INT default_shift_truncation_mask
   (enum machine_mode);
+/* APPLE LOCAL begin mainline */
+extern tree default_stack_protect_guard (void);
+extern tree default_external_stack_protect_fail (void);
+extern tree default_hidden_stack_protect_fail (void);
+/* APPLE LOCAL end mainline */
 
 extern tree default_cxx_guard_type (void);
 extern tree default_cxx_get_cookie_size (tree);
@@ -49,8 +56,6 @@ extern void default_unwind_emit (FILE *, rtx);
 
 extern bool default_scalar_mode_supported_p (enum machine_mode);
 
-extern bool default_vect_misaligned_mem_ok (enum machine_mode);
-
 /* These are here, and not in hooks.[ch], because not all users of
    hooks.h include tm.h, and thus we don't have CUMULATIVE_ARGS.  */
 
@@ -61,3 +66,16 @@ extern bool hook_bool_CUMULATIVE_ARGS_mode_tree_bool_false
   (CUMULATIVE_ARGS *, enum machine_mode, tree, bool);
 extern bool hook_bool_CUMULATIVE_ARGS_mode_tree_bool_true
   (CUMULATIVE_ARGS *, enum machine_mode, tree, bool);
+extern int hook_int_CUMULATIVE_ARGS_mode_tree_bool_0
+  (CUMULATIVE_ARGS *, enum machine_mode, tree, bool);
+/* APPLE LOCAL begin mainline 2005-04-14 */
+extern const char *hook_invalid_arg_for_unprototyped_fn
+  (tree, tree, tree);
+/* APPLE LOCAL end mainline 2005-04-14 */
+/* APPLE LOCAL begin 4375453 */
+extern bool vector_alignment_reachable (tree, bool);
+extern bool default_vector_alignment_reachable (tree, bool);
+/* APPLE LOCAL end 4375453 */
+/* APPLE LOCAL begin mainline 2006-02-17 4356747 stack realign */
+extern rtx default_internal_arg_pointer (void);
+/* APPLE LOCAL end mainline 2006-02-17 4356747 stack realign */

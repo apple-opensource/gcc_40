@@ -1,5 +1,5 @@
 /* Built-in and inline functions for gcj
-   Copyright (C) 2001, 2003, 2004
+   Copyright (C) 2001, 2003, 2004, 2005
    Free Software Foundation, Inc.
 
 This file is part of GCC.
@@ -163,6 +163,7 @@ initialize_builtins (void)
   tree float_ftype_float, float_ftype_float_float;
   /* APPLE LOCAL lno */
   tree void_ftype;
+  tree boolean_ftype_boolean_boolean;
   tree t;
   int i;
 
@@ -187,8 +188,9 @@ initialize_builtins (void)
   t = tree_cons (NULL_TREE, double_type_node, t);
   double_ftype_double_double = build_function_type (double_type_node, t);
 
-  /* APPLE LOCAL lno */
+  /* APPLE LOCAL begin lno */
   void_ftype = build_function_type (void_type_node, NULL_TREE);
+  /* APPLE LOCAL end lno */
 
   define_builtin (BUILT_IN_FMOD, "__builtin_fmod",
 		  double_ftype_double_double, "fmod");
@@ -225,6 +227,15 @@ initialize_builtins (void)
   define_builtin (BUILT_IN_MAYBE_INFINITE_LOOP, "__builtin_maybe_infinite_loop",
 		  void_ftype, "__builtin_maybe_infinite_loop");
   /* APPLE LOCAL end lno */
+  
+  t = tree_cons (NULL_TREE, boolean_type_node, end_params_node);
+  t = tree_cons (NULL_TREE, boolean_type_node, t);
+  boolean_ftype_boolean_boolean = build_function_type (boolean_type_node, t);
+  define_builtin (BUILT_IN_EXPECT, "__builtin_expect", 
+		  boolean_ftype_boolean_boolean,
+		  "__builtin_expect");
+		  
+  build_common_builtin_nodes ();
 }
 
 /* If the call matches a builtin, return the

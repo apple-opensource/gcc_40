@@ -1,8 +1,15 @@
-/* APPLE LOCAL file Objective-C++ */
+/* APPLE LOCAL file mainline */
 /* Author:  Ziemowit Laski <zlaski@apple.com>.  */
-/* { dg-do run } */
+/* APPLE LOCAL radar 4842177 , radar 5706927 */
+/* { dg-options "-fnext-runtime -mmacosx-version-min=10.3 -fno-constant-cfstrings" { target powerpc*-*-darwin* } } */
+/* { dg-options "-fnext-runtime -fno-constant-cfstrings" { target arm*-*-darwin* } } */
+/* APPLE LOCAL Radar 5706927 */
+/* { dg-do run { target powerpc*-*-darwin* } } */
+/* APPLE LOCAL radar 4894756 */
+/* { dg-skip-if "" { *-*-darwin* } { "-m64" } { "" } } */
 
-#include <objc/Object.h>
+/* APPLE LOCAL radar 4894756 */
+#include "../objc/execute/Object2.h"
 #include <stdarg.h>
 #include <stdlib.h>
 

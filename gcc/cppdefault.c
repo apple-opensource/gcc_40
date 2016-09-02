@@ -1,6 +1,6 @@
 /* CPP Library.
    Copyright (C) 1986, 1987, 1989, 1992, 1993, 1994, 1995, 1996, 1997, 1998,
-   1999, 2000, 2003 Free Software Foundation, Inc.
+   1999, 2000, 2003, 2004 Free Software Foundation, Inc.
    Contributed by Per Bothner, 1994-95.
    Based on CCCP program by Paul Rubin, June 1986
    Adapted to ANSI C, Richard Stallman, Jan 1987
@@ -33,7 +33,9 @@ Foundation, 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  */
 #define STANDARD_INCLUDE_COMPONENT 0
 #endif
 
-#if defined (CROSS_COMPILE) && !defined (TARGET_SYSTEM_ROOT)
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#if defined (CROSS_DIRECTORY_STRUCTURE) && !defined (TARGET_SYSTEM_ROOT)
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
 # undef LOCAL_INCLUDE_DIR
 # undef SYSTEM_INCLUDE_DIR
 # undef STANDARD_INCLUDE_DIR
@@ -100,10 +102,4 @@ const size_t cpp_GCC_INCLUDE_DIR_len = sizeof GCC_INCLUDE_DIR - 8;
 #else
 const char cpp_GCC_INCLUDE_DIR[] = "";
 const size_t cpp_GCC_INCLUDE_DIR_len = 0;
-#endif
-
-#ifdef TARGET_SYSTEM_ROOT
-const char *cpp_SYSROOT = TARGET_SYSTEM_ROOT;
-#else
-const char *cpp_SYSROOT = "";
 #endif

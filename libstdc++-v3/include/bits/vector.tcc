@@ -1,6 +1,6 @@
 // Vector implementation (out of line) -*- C++ -*-
 
-// Copyright (C) 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+// Copyright (C) 2001, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -121,7 +121,7 @@ namespace _GLIBCXX_STD
     vector<_Tp, _Alloc>::
     erase(iterator __first, iterator __last)
     {
-      iterator __i(copy(__last, end(), __first));
+      iterator __i(std::copy(__last, end(), __first));
       std::_Destroy(__i, end(), this->get_allocator());
       this->_M_impl._M_finish = this->_M_impl._M_finish - (__last - __first);
       return __first;
@@ -149,7 +149,7 @@ namespace _GLIBCXX_STD
 	    }
 	  else if (size() >= __xlen)
 	    {
-	      iterator __i(copy(__x.begin(), __x.end(), begin()));
+	      iterator __i(std::copy(__x.begin(), __x.end(), begin()));
 	      std::_Destroy(__i, end(), this->get_allocator());
 	    }
 	  else
@@ -192,7 +192,7 @@ namespace _GLIBCXX_STD
       void
       vector<_Tp, _Alloc>::
       _M_assign_aux(_InputIterator __first, _InputIterator __last,
-		    input_iterator_tag)
+		    std::input_iterator_tag)
       {
 	iterator __cur(begin());
 	for (; __first != __last && __cur != end(); ++__cur, ++__first)
@@ -208,7 +208,7 @@ namespace _GLIBCXX_STD
       void
       vector<_Tp, _Alloc>::
       _M_assign_aux(_ForwardIterator __first, _ForwardIterator __last,
-		    forward_iterator_tag)
+		    std::forward_iterator_tag)
       {
 	const size_type __len = std::distance(__first, __last);
 
@@ -226,7 +226,7 @@ namespace _GLIBCXX_STD
 	  }
 	else if (size() >= __len)
 	  {
-	    iterator __new_finish(copy(__first, __last,
+	    iterator __new_finish(std::copy(__first, __last,
 				       this->_M_impl._M_start));
 	    std::_Destroy(__new_finish, end(), this->get_allocator());
 	    this->_M_impl._M_finish = __new_finish.base();
@@ -392,7 +392,7 @@ namespace _GLIBCXX_STD
     void
     vector<_Tp, _Alloc>::
     _M_range_insert(iterator __pos, _InputIterator __first,
-		    _InputIterator __last, input_iterator_tag)
+		    _InputIterator __last, std::input_iterator_tag)
     {
       for (; __first != __last; ++__first)
 	{
@@ -406,7 +406,7 @@ namespace _GLIBCXX_STD
       void
       vector<_Tp, _Alloc>::
       _M_range_insert(iterator __position, _ForwardIterator __first,
-		      _ForwardIterator __last, forward_iterator_tag)
+		      _ForwardIterator __last, std::forward_iterator_tag)
       {
 	if (__first != __last)
 	  {

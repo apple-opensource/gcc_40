@@ -21,18 +21,20 @@
 # Having this file here magically tells dejagnu that the treelang
 # directory is worthy of testing
 
-# This file is basically treelang.exp with treelang replaced with treelang.
+# This file is basically gcc.exp with gcc replaced with treelang.
 
 # This file is loaded by the tool init file (eg: unix.exp).  It provides
-# default definitions for treelang_start, etc. and other supporting cast members.
+# default definitions for treelang_start, etc. and other supporting cast
+# members.
 
-# These globals are used by treelang_start if no compiler arguments are provided.
-# They are also used by the various testsuites to define the environment:
-# where to find stdio.h, libc.a, etc.
+# These globals are used by treelang_start if no compiler arguments are
+# provided.  They are also used by the various testsuites to define the
+# environment: where to find stdio.h, libc.a, etc.
 
 load_lib libgloss.exp
 load_lib prune.exp
 load_lib gcc-defs.exp
+load_lib target-libpath.exp
 
 #
 # TREELANG_UNDER_TEST is the compiler under test.
@@ -82,7 +84,6 @@ proc default_treelang_version { } {
 set treelang_initialized 0
 
 proc treelang_init { args } {
-    global rootme
     global tmpdir
     global libdir
     global gluefile wrap_flags
@@ -90,6 +91,12 @@ proc treelang_init { args } {
     global TREELANG_UNDER_TEST
     global TOOL_EXECUTABLE
     global treelang_libgcc_s_path
+
+
+    # We set LC_ALL and LANG to C so that we get the same error messages as expected.
+    setenv LC_ALL C
+    setenv LANG C
+
 
     if { $treelang_initialized == 1 } { return; }
 
@@ -107,21 +114,8 @@ proc treelang_init { args } {
 
     treelang_maybe_build_wrapper "${tmpdir}/treelang-testglue.o"
 
-    set treelang_libgcc_s_path "${rootme}"
-    set compiler [lindex $TREELANG_UNDER_TEST 0]
-    if { [is_remote host] == 0 && [which $compiler] != 0 } {
-	foreach i "[exec $compiler --print-multi-lib]" {
-	    set mldir ""
-	    regexp -- "\[a-z0-9=/\.-\]*;" $i mldir
-	    set mldir [string trimright $mldir "\;@"]
-	    if { "$mldir" == "." } {
-		continue
-	    }
-	    if { [llength [glob -nocomplain ${rootme}/${mldir}/libgcc_s*.so.*]] >= 1 } {
-		append treelang_libgcc_s_path ":${rootme}/${mldir}"
-	    }
-	}
-    }
+    set treelang_libgcc_s_path \
+	[gcc-set-multilib-library-path $TREELANG_UNDER_TEST]
 }
 
 proc treelang_target_compile { source dest type options } {
@@ -135,7 +129,7 @@ proc treelang_target_compile { source dest type options } {
     global treelang_libgcc_s_path
 
     set ld_library_path ".:${treelang_libgcc_s_path}"
-    lappend options "libs=-ltreelang"
+    set_ld_library_path_env_vars
 
     if { [target_info needs_status_wrapper]!="" && [info exists gluefile] } {
 	lappend options "libs=${gluefile}"
@@ -145,7 +139,8 @@ proc treelang_target_compile { source dest type options } {
     # TOOL_OPTIONS must come first, so that it doesn't override testcase
     # specific options.
     if [info exists TOOL_OPTIONS] {
-	set options [concat "additional_flags=$TOOL_OPTIONS" $options];
+	# APPLE LOCAL mainline
+	set options [concat "{additional_flags=$TOOL_OPTIONS}" $options];
     }
 
     # If we have built libtreelang along with the compiler (which usually

@@ -1,6 +1,6 @@
 /* Expands front end tree to back end RTL for GCC.
    Copyright (C) 1987, 1988, 1989, 1991, 1992, 1993, 1994, 1995, 1996, 1997,
-   1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005 
+   1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005
    Free Software Foundation, Inc.
 
 This file is part of GCC.
@@ -60,6 +60,9 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "langhooks.h"
 #include "target.h"
 #include "cfglayout.h"
+#include "tree-gimple.h"
+/* APPLE LOCAL mainline */
+#include "predict.h"
 
 #ifndef LOCAL_ALIGNMENT
 #define LOCAL_ALIGNMENT(TYPE, ALIGNMENT) ALIGNMENT
@@ -286,7 +289,6 @@ pop_function_context_from (tree context ATTRIBUTE_UNUSED)
   outer_function_chain = p->outer;
 
   current_function_decl = p->decl;
-  reg_renumber = 0;
 
   lang_hooks.function.leave_nested (p);
 
@@ -356,11 +358,12 @@ free_after_compilation (struct function *f)
 HOST_WIDE_INT
 get_func_frame_size (struct function *f)
 {
-#ifdef FRAME_GROWS_DOWNWARD
+  /* APPLE LOCAL begin mainline */
+  if (FRAME_GROWS_DOWNWARD)
   return -f->x_frame_offset;
-#else
+  else
   return f->x_frame_offset;
-#endif
+  /* APPLE LOCAL end mainline */
 }
 
 /* Return size needed for stack frame based on slots so far allocated.
@@ -421,9 +424,10 @@ assign_stack_local_1 (enum machine_mode mode, HOST_WIDE_INT size, int align,
   else
     alignment = align / BITS_PER_UNIT;
 
-#ifdef FRAME_GROWS_DOWNWARD
+  /* APPLE LOCAL begin mainline */
+  if (FRAME_GROWS_DOWNWARD)
   function->x_frame_offset -= size;
-#endif
+  /* APPLE LOCAL end mainline */
 
   /* Ignore alignment we can't do with expected alignment of the boundary.  */
   if (alignment * BITS_PER_UNIT > PREFERRED_STACK_BOUNDARY)
@@ -449,17 +453,18 @@ assign_stack_local_1 (enum machine_mode mode, HOST_WIDE_INT size, int align,
 	  division with a negative dividend isn't as well defined as we might
 	  like.  So we instead assume that ALIGNMENT is a power of two and
 	  use logical operations which are unambiguous.  */
-#ifdef FRAME_GROWS_DOWNWARD
+      /* APPLE LOCAL begin mainline */
+      if (FRAME_GROWS_DOWNWARD)
       function->x_frame_offset
 	= (FLOOR_ROUND (function->x_frame_offset - frame_phase,
 			(unsigned HOST_WIDE_INT) alignment)
 	   + frame_phase);
-#else
+      else
       function->x_frame_offset
 	= (CEIL_ROUND (function->x_frame_offset - frame_phase,
 		       (unsigned HOST_WIDE_INT) alignment)
 	   + frame_phase);
-#endif
+      /* APPLE LOCAL end mainline */
     }
 
   /* On a big-endian machine, if we are allocating more space than we will use,
@@ -480,9 +485,10 @@ assign_stack_local_1 (enum machine_mode mode, HOST_WIDE_INT size, int align,
 			  (function->x_frame_offset + bigend_correction,
 			   Pmode));
 
-#ifndef FRAME_GROWS_DOWNWARD
+  /* APPLE LOCAL begin mainline */
+  if (!FRAME_GROWS_DOWNWARD)
   function->x_frame_offset += size;
-#endif
+  /* APPLE LOCAL end mainline */
 
   x = gen_rtx_MEM (mode, addr);
 
@@ -592,7 +598,7 @@ make_slot_available (struct temp_slot *temp)
   temp->in_use = 0;
   temp->level = -1;
 }
-
+
 /* Allocate a temporary stack slot and record it for possible later
    reuse.
 
@@ -724,20 +730,24 @@ assign_stack_temp_for_type (enum machine_mode mode, HOST_WIDE_INT size, int keep
 	 can be either above or below this stack slot depending on which
 	 way the frame grows.  We include the extra space if and only if it
 	 is above this slot.  */
-#ifdef FRAME_GROWS_DOWNWARD
+      /* APPLE LOCAL begin mainline */
+      if (FRAME_GROWS_DOWNWARD)
       p->size = frame_offset_old - frame_offset;
-#else
+      else
       p->size = size;
-#endif
 
       /* Now define the fields used by combine_temp_slots.  */
-#ifdef FRAME_GROWS_DOWNWARD
+      if (FRAME_GROWS_DOWNWARD)
+	{
       p->base_offset = frame_offset;
       p->full_size = frame_offset_old - frame_offset;
-#else
+	}
+      else
+	{
       p->base_offset = frame_offset_old;
       p->full_size = frame_offset - frame_offset_old;
-#endif
+	}
+      /* APPLE LOCAL end mainline */
       p->address = 0;
 
       selected = p;
@@ -868,7 +878,7 @@ assign_temp (tree type_or_decl, int keep, int memory_required,
    done for BLKmode slots because we can be sure that we won't have alignment
    problems in this case.  */
 
-void
+static void
 combine_temp_slots (void)
 {
   struct temp_slot *p, *q, *next, *next_q;
@@ -1940,17 +1950,10 @@ use_register_for_decl (tree decl)
   if (flag_float_store && FLOAT_TYPE_P (TREE_TYPE (decl)))
     return false;
 
-  /* Compiler-generated temporaries can always go in registers.  */
-  if (DECL_ARTIFICIAL (decl))
+  /* If we're not interested in tracking debugging information for
+     this decl, then we can certainly put it in a register.  */
+  if (DECL_IGNORED_P (decl))
     return true;
-
-#ifdef NON_SAVING_SETJMP
-  /* Protect variables not declared "register" from setjmp.  */
-  if (NON_SAVING_SETJMP
-      && current_function_calls_setjmp
-      && !DECL_REGISTER (decl))
-    return false;
-#endif
 
   return (optimize || DECL_REGISTER (decl));
 }
@@ -2016,7 +2019,6 @@ struct assign_parm_data_one
   struct locate_and_pad_arg_data locate;
   int partial;
   BOOL_BITFIELD named_arg : 1;
-  BOOL_BITFIELD last_named : 1;
   BOOL_BITFIELD passed_pointer : 1;
   BOOL_BITFIELD on_stack : 1;
   BOOL_BITFIELD loaded_in_reg : 1;
@@ -2075,6 +2077,7 @@ split_complex_args (tree args)
 	{
 	  tree decl;
 	  tree subtype = TREE_TYPE (type);
+	  bool addressable = TREE_ADDRESSABLE (p);
 
 	  /* Rewrite the PARM_DECL's type with its component.  */
 	  TREE_TYPE (p) = subtype;
@@ -2082,11 +2085,20 @@ split_complex_args (tree args)
 	  DECL_MODE (p) = VOIDmode;
 	  DECL_SIZE (p) = NULL;
 	  DECL_SIZE_UNIT (p) = NULL;
+	  /* If this arg must go in memory, put it in a pseudo here.
+	     We can't allow it to go in memory as per normal parms,
+	     because the usual place might not have the imag part
+	     adjacent to the real part.  */
+	  DECL_ARTIFICIAL (p) = addressable;
+	  DECL_IGNORED_P (p) = addressable;
+	  TREE_ADDRESSABLE (p) = 0;
 	  layout_decl (p, 0);
 
 	  /* Build a second synthetic decl.  */
 	  decl = build_decl (PARM_DECL, NULL_TREE, subtype);
 	  DECL_ARG_TYPE (decl) = DECL_ARG_TYPE (p);
+	  DECL_ARTIFICIAL (decl) = addressable;
+	  DECL_IGNORED_P (decl) = addressable;
 	  layout_decl (decl, 0);
 
 	  /* Splice it in; skip the new decl.  */
@@ -2121,6 +2133,7 @@ assign_parms_augmented_arg_list (struct assign_parm_data_all *all)
       decl = build_decl (PARM_DECL, NULL_TREE, type);
       DECL_ARG_TYPE (decl) = type;
       DECL_ARTIFICIAL (decl) = 1;
+      DECL_IGNORED_P (decl) = 1;
 
       TREE_CHAIN (decl) = fnargs;
       fnargs = decl;
@@ -2149,24 +2162,15 @@ assign_parm_find_data_types (struct assign_parm_data_all *all, tree parm,
 
   memset (data, 0, sizeof (*data));
 
-  /* Set LAST_NAMED if this is last named arg before last anonymous args.  */
-  if (current_function_stdarg)
-    {
-      tree tem;
-      for (tem = TREE_CHAIN (parm); tem; tem = TREE_CHAIN (tem))
-	if (DECL_NAME (tem))
-	  break;
-      if (tem == 0)
-	data->last_named = true;
-    }
-
-  /* Set NAMED_ARG if this arg should be treated as a named arg.  For
-     most machines, if this is a varargs/stdarg function, then we treat
-     the last named arg as if it were anonymous too.  */
-  if (targetm.calls.strict_argument_naming (&all->args_so_far))
-    data->named_arg = 1;
+  /* NAMED_ARG is a mis-nomer.  We really mean 'non-varadic'. */
+  if (!current_function_stdarg)
+    data->named_arg = 1;  /* No varadic parms.  */
+  else if (TREE_CHAIN (parm))
+    data->named_arg = 1;  /* Not the last non-varadic parm. */
+  else if (targetm.calls.strict_argument_naming (&all->args_so_far))
+    data->named_arg = 1;  /* Only varadic ones are unnamed.  */
   else
-    data->named_arg = !data->last_named;
+    data->named_arg = 0;  /* Treat as varadic.  */
 
   nominal_type = TREE_TYPE (parm);
   passed_type = DECL_ARG_TYPE (parm);
@@ -2312,10 +2316,10 @@ assign_parm_find_entry_rtl (struct assign_parm_data_all *all,
     {
       int partial;
 
-      partial = FUNCTION_ARG_PARTIAL_NREGS (all->args_so_far,
-					    data->promoted_mode,
-					    data->passed_type,
-					    data->named_arg);
+      partial = targetm.calls.arg_partial_bytes (&all->args_so_far,
+						 data->promoted_mode,
+						 data->passed_type,
+						 data->named_arg);
       data->partial = partial;
 
       /* The caller might already have allocated stack space for the
@@ -2341,7 +2345,7 @@ assign_parm_find_entry_rtl (struct assign_parm_data_all *all,
 	     argument on the stack.  */
 	  gcc_assert (!all->extra_pretend_bytes && !all->pretend_args_size);
 
-	  pretend_bytes = partial * UNITS_PER_WORD;
+	  pretend_bytes = partial;
 	  all->pretend_args_size = CEIL_ROUND (pretend_bytes, STACK_BYTES);
 
 	  /* We want to align relative to the actual stack pointer, so
@@ -2464,8 +2468,11 @@ assign_parm_adjust_entry_rtl (struct assign_parm_data_one *data)
 			  data->passed_type, 
 			  int_size_in_bytes (data->passed_type));
       else
-	move_block_from_reg (REGNO (entry_parm), validize_mem (stack_parm),
-			     data->partial);
+	{
+	  gcc_assert (data->partial % UNITS_PER_WORD == 0);
+	  move_block_from_reg (REGNO (entry_parm), validize_mem (stack_parm),
+			       data->partial / UNITS_PER_WORD);
+	}
 
       entry_parm = stack_parm;
     }
@@ -2524,6 +2531,15 @@ assign_parm_adjust_stack_rtl (struct assign_parm_data_one *data)
 	   && data->nominal_mode != BLKmode
 	   && data->nominal_mode != data->passed_mode)
     stack_parm = NULL;
+  /* APPLE LOCAL begin mainline */
+  /* If stack protection is in effect for this function, don't leave any
+     pointers in their passed stack slots.  */
+  else if (cfun->stack_protect_guard
+	   && (flag_stack_protect == 2
+	       || data->passed_pointer
+	       || POINTER_TYPE_P (data->nominal_type)))
+    stack_parm = NULL;
+  /* APPLE LOCAL end mainline */
 
   data->stack_parm = stack_parm;
 }
@@ -2563,28 +2579,64 @@ assign_parm_setup_block (struct assign_parm_data_all *all,
   rtx stack_parm = data->stack_parm;
   HOST_WIDE_INT size;
   HOST_WIDE_INT size_stored;
+  rtx orig_entry_parm = entry_parm;
+
+  if (GET_CODE (entry_parm) == PARALLEL)
+    entry_parm = emit_group_move_into_temps (entry_parm);
 
   /* If we've a non-block object that's nevertheless passed in parts,
      reconstitute it in register operations rather than on the stack.  */
   if (GET_CODE (entry_parm) == PARALLEL
-      && data->nominal_mode != BLKmode
-      && XVECLEN (entry_parm, 0) > 1
-      && use_register_for_decl (parm))
+      && data->nominal_mode != BLKmode)
     {
-      rtx parmreg = gen_reg_rtx (data->nominal_mode);
+      rtx elt0 = XEXP (XVECEXP (orig_entry_parm, 0, 0), 0);
 
-      emit_group_store (parmreg, entry_parm, data->nominal_type,
-			int_size_in_bytes (data->nominal_type));
-      SET_DECL_RTL (parm, parmreg);
-      return;
+      if ((XVECLEN (entry_parm, 0) > 1
+	   || hard_regno_nregs[REGNO (elt0)][GET_MODE (elt0)] > 1)
+	  && use_register_for_decl (parm))
+	{
+	  rtx parmreg = gen_reg_rtx (data->nominal_mode);
+
+	  push_to_sequence (all->conversion_insns);
+
+	  /* For values returned in multiple registers, handle possible
+	     incompatible calls to emit_group_store.
+
+	     For example, the following would be invalid, and would have to
+	     be fixed by the conditional below:
+
+	     emit_group_store ((reg:SF), (parallel:DF))
+	     emit_group_store ((reg:SI), (parallel:DI))
+
+	     An example of this are doubles in e500 v2:
+	     (parallel:DF (expr_list (reg:SI) (const_int 0))
+	     (expr_list (reg:SI) (const_int 4))).  */
+	  if (data->nominal_mode != data->passed_mode)
+	    {
+	      rtx t = gen_reg_rtx (GET_MODE (entry_parm));
+	      emit_group_store (t, entry_parm, NULL_TREE,
+				GET_MODE_SIZE (GET_MODE (entry_parm)));
+	      convert_move (parmreg, t, 0);
+	    }
+	  else
+	    emit_group_store (parmreg, entry_parm, data->nominal_type,
+			      int_size_in_bytes (data->nominal_type));
+
+	  all->conversion_insns = get_insns ();
+	  end_sequence ();
+
+	  SET_DECL_RTL (parm, parmreg);
+	  return;
+	}
     }
 
   size = int_size_in_bytes (data->passed_type);
   size_stored = CEIL_ROUND (size, UNITS_PER_WORD);
   if (stack_parm == 0)
     {
+      DECL_ALIGN (parm) = MAX (DECL_ALIGN (parm), BITS_PER_WORD);
       stack_parm = assign_stack_local (BLKmode, size_stored,
-				       TYPE_ALIGN (data->passed_type));
+				       DECL_ALIGN (parm));
       if (GET_MODE_SIZE (GET_MODE (entry_parm)) == size)
 	PUT_MODE (stack_parm, GET_MODE (entry_parm));
       set_mem_attributes (stack_parm, parm, 1);
@@ -2616,7 +2668,12 @@ assign_parm_setup_block (struct assign_parm_data_all *all,
 
       /* Handle values in multiple non-contiguous locations.  */
       if (GET_CODE (entry_parm) == PARALLEL)
-	emit_group_store (mem, entry_parm, data->passed_type, size);
+	{
+	  push_to_sequence (all->conversion_insns);
+	  emit_group_store (mem, entry_parm, data->passed_type, size);
+	  all->conversion_insns = get_insns ();
+	  end_sequence ();
+	}
 
       else if (size == 0)
 	;
@@ -2655,7 +2712,7 @@ assign_parm_setup_block (struct assign_parm_data_all *all,
 	    {
 	      rtx tem, x;
 	      int by = (UNITS_PER_WORD - size) * BITS_PER_UNIT;
-	      rtx reg = gen_rtx_REG (word_mode, REGNO (data->entry_parm));
+	      rtx reg = gen_rtx_REG (word_mode, REGNO (entry_parm));
 
 	      x = expand_shift (LSHIFT_EXPR, word_mode, reg,
 				build_int_cst (NULL_TREE, by),
@@ -2664,18 +2721,18 @@ assign_parm_setup_block (struct assign_parm_data_all *all,
 	      emit_move_insn (tem, x);
 	    }
 	  else
-	    move_block_from_reg (REGNO (data->entry_parm), mem,
+	    move_block_from_reg (REGNO (entry_parm), mem,
 				 size_stored / UNITS_PER_WORD);
 	}
       else
-	move_block_from_reg (REGNO (data->entry_parm), mem,
+	move_block_from_reg (REGNO (entry_parm), mem,
 			     size_stored / UNITS_PER_WORD);
     }
   else if (data->stack_parm == 0)
     {
       push_to_sequence (all->conversion_insns);
       emit_block_move (stack_parm, data->entry_parm, GEN_INT (size),
-                       BLOCK_OP_NORMAL);
+		       BLOCK_OP_NORMAL);
       all->conversion_insns = get_insns ();
       end_sequence ();
     }
@@ -2702,6 +2759,17 @@ assign_parm_setup_reg (struct assign_parm_data_all *all, tree parm,
   promoted_nominal_mode
     = promote_mode (data->nominal_type, data->nominal_mode, &unsignedp, 0);
 
+  /* APPLE LOCAL begin CW asm blocks */
+  /* In asm functions with no stack frame, leave it in the register.  */
+  if (cfun->iasm_frame_size == -2
+      && cfun->iasm_noreturn)
+    {
+      parmreg = DECL_INCOMING_RTL (parm);
+      if (promoted_nominal_mode != GET_MODE (parmreg))
+	warning ("wrong mode for arg %qD", parm);
+    }
+  else
+  /* APPLE LOCAL end CW asm blocks */
   parmreg = gen_reg_rtx (promoted_nominal_mode);
 
   if (!DECL_ARTIFICIAL (parm))
@@ -2798,7 +2866,7 @@ assign_parm_setup_reg (struct assign_parm_data_all *all, tree parm,
 	  emit_move_insn (tempreg, DECL_RTL (parm));
 	  tempreg = convert_to_mode (GET_MODE (parmreg), tempreg, unsigned_p);
 	  emit_move_insn (parmreg, tempreg);
-	  all->conversion_insns = get_insns();
+	  all->conversion_insns = get_insns ();
 	  end_sequence ();
 
 	  did_conversion = true;
@@ -2811,50 +2879,6 @@ assign_parm_setup_reg (struct assign_parm_data_all *all, tree parm,
       /* STACK_PARM is the pointer, not the parm, and PARMREG is
 	 now the parm.  */
       data->stack_parm = NULL;
-    }
-
-  /* If we are passed an arg by reference and it is our responsibility
-     to make a copy, do it now.
-     PASSED_TYPE and PASSED mode now refer to the pointer, not the
-     original argument, so we must recreate them in the call to
-     FUNCTION_ARG_CALLEE_COPIES.  */
-  /* ??? Later add code to handle the case that if the argument isn't
-     modified, don't do the copy.  */
-
-  else if (data->passed_pointer)
-    {
-      tree type = TREE_TYPE (data->passed_type);
-    
-      if (reference_callee_copied (&all->args_so_far, TYPE_MODE (type),
-				   type, data->named_arg))
-	{
-	  rtx copy;
-
-	  /* This sequence may involve a library call perhaps clobbering
-	     registers that haven't been copied to pseudos yet.  */
-
-	  push_to_sequence (all->conversion_insns);
-
-	  if (!COMPLETE_TYPE_P (type)
-	      || TREE_CODE (TYPE_SIZE (type)) != INTEGER_CST)
-	    {
-	      /* This is a variable sized object.  */
-	      copy = allocate_dynamic_stack_space (expr_size (parm), NULL_RTX,
-						   TYPE_ALIGN (type));
-	      copy = gen_rtx_MEM (BLKmode, copy);
-	    }
-	  else
-	    copy = assign_stack_temp (TYPE_MODE (type),
-				      int_size_in_bytes (type), 1);
-	  set_mem_attributes (copy, parm, 1);
-
-	  store_expr (parm, copy, 0);
-	  emit_move_insn (parmreg, XEXP (copy, 0));
-	  all->conversion_insns = get_insns ();
-	  end_sequence ();
-
-	  did_conversion = true;
-	}
     }
 
   /* Mark the register as eliminable if we did no conversion and it was
@@ -2878,10 +2902,11 @@ assign_parm_setup_reg (struct assign_parm_data_all *all, tree parm,
 	{
 	  enum machine_mode submode
 	    = GET_MODE_INNER (GET_MODE (parmreg));
-	  int regnor = REGNO (gen_realpart (submode, parmreg));
-	  int regnoi = REGNO (gen_imagpart (submode, parmreg));
-	  rtx stackr = gen_realpart (submode, data->stack_parm);
-	  rtx stacki = gen_imagpart (submode, data->stack_parm);
+	  int regnor = REGNO (XEXP (parmreg, 0));
+	  int regnoi = REGNO (XEXP (parmreg, 1));
+	  rtx stackr = adjust_address_nv (data->stack_parm, submode, 0);
+	  rtx stacki = adjust_address_nv (data->stack_parm, submode,
+					  GET_MODE_SIZE (submode));
 
 	  /* Scan backwards for the set of the real and
 	     imaginary parts.  */
@@ -3010,27 +3035,26 @@ assign_parms_unsplit_complex (struct assign_parm_data_all *all, tree fnargs)
 	      imag = gen_lowpart_SUBREG (inner, imag);
 	    }
 
-          if (TREE_ADDRESSABLE (parm))
-            {
-              rtx rmem, imem;
-              HOST_WIDE_INT size = int_size_in_bytes (TREE_TYPE (parm));
+	  if (TREE_ADDRESSABLE (parm))
+	    {
+	      rtx rmem, imem;
+	      HOST_WIDE_INT size = int_size_in_bytes (TREE_TYPE (parm));
 
-              /* split_complex_arg put the real and imag parts in
-                 pseudos.  Move them to memory.  */
-              tmp = assign_stack_local (DECL_MODE (parm), size,
-                                        TYPE_ALIGN (TREE_TYPE (parm)));
-              set_mem_attributes (tmp, parm, 1);
-              rmem = adjust_address_nv (tmp, inner, 0);
-              imem = adjust_address_nv (tmp, inner, GET_MODE_SIZE (inner));
-              push_to_sequence (all->conversion_insns);
-              emit_move_insn (rmem, real);
-              emit_move_insn (imem, imag);
-              all->conversion_insns = get_insns ();
-              end_sequence ();
-            }
-          else
-            tmp = gen_rtx_CONCAT (DECL_MODE (parm), real, imag);
-
+	      /* split_complex_arg put the real and imag parts in
+		 pseudos.  Move them to memory.  */
+	      tmp = assign_stack_local (DECL_MODE (parm), size,
+					TYPE_ALIGN (TREE_TYPE (parm)));
+	      set_mem_attributes (tmp, parm, 1);
+	      rmem = adjust_address_nv (tmp, inner, 0);
+	      imem = adjust_address_nv (tmp, inner, GET_MODE_SIZE (inner));
+	      push_to_sequence (all->conversion_insns);
+	      emit_move_insn (rmem, real);
+	      emit_move_insn (imem, imag);
+	      all->conversion_insns = get_insns ();
+	      end_sequence ();
+	    }
+	  else
+	    tmp = gen_rtx_CONCAT (DECL_MODE (parm), real, imag);
 	  SET_DECL_RTL (parm, tmp);
 
 	  real = DECL_INCOMING_RTL (fnargs);
@@ -3062,32 +3086,19 @@ assign_parms_unsplit_complex (struct assign_parm_data_all *all, tree fnargs)
 /* Assign RTL expressions to the function's parameters.  This may involve
    copying them into registers and using those registers as the DECL_RTL.  */
 
-void
+static void
 assign_parms (tree fndecl)
 {
   struct assign_parm_data_all all;
   tree fnargs, parm;
-  rtx internal_arg_pointer;
-  int varargs_setup = 0;
-  /* APPLE LOCAL begin AltiVec */
+  /* APPLE LOCAL deletion mainline 2006-02-17 4356747 stack realign */
+  /* APPLE LOCAL AltiVec */
   int pass, last_pass;
-  /* APPLE LOCAL end AltiVec */
 
-
-  /* If the reg that the virtual arg pointer will be translated into is
-     not a fixed reg or is the stack pointer, make a copy of the virtual
-     arg pointer, and address parms via the copy.  The frame pointer is
-     considered fixed even though it is not marked as such.
-
-     The second time through, simply use ap to avoid generating rtx.  */
-
-  if ((ARG_POINTER_REGNUM == STACK_POINTER_REGNUM
-       || ! (fixed_regs[ARG_POINTER_REGNUM]
-	     || ARG_POINTER_REGNUM == FRAME_POINTER_REGNUM)))
-    internal_arg_pointer = copy_to_reg (virtual_incoming_args_rtx);
-  else
-    internal_arg_pointer = virtual_incoming_args_rtx;
-  current_function_internal_arg_pointer = internal_arg_pointer;
+  /* APPLE LOCAL begin mainline 2006-02-17 4356747 stack realign */
+  current_function_internal_arg_pointer
+    = targetm.calls.internal_arg_pointer ();
+  /* APPLE LOCAL end mainline 2006-02-17 4356747 stack realign */
 
   assign_parms_initialize_all (&all);
   fnargs = assign_parms_augmented_arg_list (&all);
@@ -3118,16 +3129,8 @@ assign_parms (tree fndecl)
 	      continue;
 	    }
 
-          /* Handle stdargs.  LAST_NAMED is a slight mis-nomer; it's also true
-	     for the unnamed dummy argument following the last named argument.
-	     See ABI silliness wrt strict_argument_naming and NAMED_ARG.  So
-	     we only want to do this when we get to the actual last named
-	     argument, which will be the first time LAST_NAMED gets set.  */
-          if (data.last_named && !varargs_setup)
-    	    {
-	      varargs_setup = true;
-	      assign_parms_setup_varargs (&all, &data, false);
-	    }
+	  if (current_function_stdarg && !TREE_CHAIN (parm))
+	    assign_parms_setup_varargs (&all, &data, false);
 
           /* Find out where the parameter arrives in this function.  */
           assign_parm_find_entry_rtl (&all, &data);
@@ -3218,8 +3221,10 @@ assign_parms (tree fndecl)
   /* See how many bytes, if any, of its args a function should try to pop
      on return.  */
 
+  /* APPLE LOCAL begin stdcall vs 16 byte alignment 4284121 */
   current_function_pops_args = RETURN_POPS_ARGS (fndecl, TREE_TYPE (fndecl),
-						 current_function_args_size);
+						 cfun->unrounded_args_size);
+  /* APPLE LOCAL end stdcall vs 16 byte alignment 4284121 */
 
   /* For stdarg.h function, save info about
      regs and stack space used by the named args.  */
@@ -3263,6 +3268,116 @@ assign_parms (tree fndecl)
 	  current_function_return_rtx = real_decl_rtl;
 	}
     }
+}
+
+/* A subroutine of gimplify_parameters, invoked via walk_tree.
+   For all seen types, gimplify their sizes.  */
+
+static tree
+gimplify_parm_type (tree *tp, int *walk_subtrees, void *data)
+{
+  tree t = *tp;
+
+  *walk_subtrees = 0;
+  if (TYPE_P (t))
+    {
+      if (POINTER_TYPE_P (t))
+	*walk_subtrees = 1;
+      else if (TYPE_SIZE (t) && !TREE_CONSTANT (TYPE_SIZE (t))
+	       && !TYPE_SIZES_GIMPLIFIED (t))
+	{
+	  gimplify_type_sizes (t, (tree *) data);
+	  *walk_subtrees = 1;
+	}
+    }
+
+  return NULL;
+}
+
+/* Gimplify the parameter list for current_function_decl.  This involves
+   evaluating SAVE_EXPRs of variable sized parameters and generating code
+   to implement callee-copies reference parameters.  Returns a list of
+   statements to add to the beginning of the function, or NULL if nothing
+   to do.  */
+
+tree
+gimplify_parameters (void)
+{
+  struct assign_parm_data_all all;
+  tree fnargs, parm, stmts = NULL;
+
+  assign_parms_initialize_all (&all);
+  fnargs = assign_parms_augmented_arg_list (&all);
+
+  for (parm = fnargs; parm; parm = TREE_CHAIN (parm))
+    {
+      struct assign_parm_data_one data;
+
+      /* Extract the type of PARM; adjust it according to ABI.  */
+      assign_parm_find_data_types (&all, parm, &data);
+
+      /* Early out for errors and void parameters.  */
+      if (data.passed_mode == VOIDmode || DECL_SIZE (parm) == NULL)
+	continue;
+
+      /* Update info on where next arg arrives in registers.  */
+      FUNCTION_ARG_ADVANCE (all.args_so_far, data.promoted_mode,
+			    data.passed_type, data.named_arg);
+
+      /* ??? Once upon a time variable_size stuffed parameter list
+	 SAVE_EXPRs (amongst others) onto a pending sizes list.  This
+	 turned out to be less than manageable in the gimple world.
+	 Now we have to hunt them down ourselves.  */
+      walk_tree_without_duplicates (&data.passed_type,
+				    gimplify_parm_type, &stmts);
+
+      if (!TREE_CONSTANT (DECL_SIZE (parm)))
+	{
+	  gimplify_one_sizepos (&DECL_SIZE (parm), &stmts);
+	  gimplify_one_sizepos (&DECL_SIZE_UNIT (parm), &stmts);
+	}
+
+      if (data.passed_pointer)
+	{
+          tree type = TREE_TYPE (data.passed_type);
+	  if (reference_callee_copied (&all.args_so_far, TYPE_MODE (type),
+				       type, data.named_arg))
+	    {
+	      tree local, t;
+
+	      /* For constant sized objects, this is trivial; for
+		 variable-sized objects, we have to play games.  */
+	      if (TREE_CONSTANT (DECL_SIZE (parm)))
+		{
+		  local = create_tmp_var (type, get_name (parm));
+		  DECL_IGNORED_P (local) = 0;
+		}
+	      else
+		{
+		  tree ptr_type, addr, args;
+
+		  ptr_type = build_pointer_type (type);
+		  addr = create_tmp_var (ptr_type, get_name (parm));
+		  DECL_IGNORED_P (addr) = 0;
+		  local = build_fold_indirect_ref (addr);
+
+		  args = tree_cons (NULL, DECL_SIZE_UNIT (parm), NULL);
+		  t = built_in_decls[BUILT_IN_ALLOCA];
+		  t = build_function_call_expr (t, args);
+		  t = fold_convert (ptr_type, t);
+		  t = build2 (MODIFY_EXPR, void_type_node, addr, t);
+		  gimplify_and_add (t, &stmts);
+		}
+
+	      t = build2 (MODIFY_EXPR, void_type_node, local, parm);
+	      gimplify_and_add (t, &stmts);
+
+	      DECL_VALUE_EXPR (parm) = local;
+	    }
+	}
+    }
+
+  return stmts;
 }
 
 /* Indicate whether REGNO is an incoming argument to the current function
@@ -3365,11 +3480,7 @@ locate_and_pad_parm (enum machine_mode passed_mode, tree type, int in_regs,
     }
 #endif /* REG_PARM_STACK_SPACE */
 
-  part_size_in_regs = 0;
-  if (reg_parm_stack_space == 0)
-    part_size_in_regs = ((partial * UNITS_PER_WORD)
-			 / (PARM_BOUNDARY / BITS_PER_UNIT)
-			 * (PARM_BOUNDARY / BITS_PER_UNIT));
+  part_size_in_regs = (reg_parm_stack_space == 0 ? partial : 0);
 
   sizetree
     = type ? size_in_bytes (type) : size_int (GET_MODE_SIZE (passed_mode));
@@ -3952,6 +4063,14 @@ init_function_start (tree subr)
 {
   prepare_function_start (subr);
 
+  /* APPLE LOCAL begin CW asm blocks */
+  if (DECL_IASM_ASM_FUNCTION (subr))
+    {
+      cfun->iasm_asm_function = true;
+      cfun->iasm_noreturn = DECL_IASM_NORETURN (subr);
+      cfun->iasm_frame_size = DECL_IASM_FRAME_SIZE (subr);
+    }
+  /* APPLE LOCAL end CW asm blocks */
   /* Prevent ever trying to delete the first instruction of a
      function.  Also tell final how to output a linenum before the
      function prologue.  Note linenums could be missing, e.g. when
@@ -3994,63 +4113,107 @@ init_function_for_compilation (void)
 void
 expand_main_function (void)
 {
-#ifdef FORCE_PREFERRED_STACK_BOUNDARY_IN_MAIN
-  if (FORCE_PREFERRED_STACK_BOUNDARY_IN_MAIN)
-    {
-      int align = PREFERRED_STACK_BOUNDARY / BITS_PER_UNIT;
-      rtx tmp, seq;
-
-      start_sequence ();
-      /* Forcibly align the stack.  */
-#ifdef STACK_GROWS_DOWNWARD
-      tmp = expand_simple_binop (Pmode, AND, stack_pointer_rtx, GEN_INT(-align),
-				 stack_pointer_rtx, 1, OPTAB_WIDEN);
-#else
-      tmp = expand_simple_binop (Pmode, PLUS, stack_pointer_rtx,
-				 GEN_INT (align - 1), NULL_RTX, 1, OPTAB_WIDEN);
-      tmp = expand_simple_binop (Pmode, AND, tmp, GEN_INT (-align),
-				 stack_pointer_rtx, 1, OPTAB_WIDEN);
-#endif
-      if (tmp != stack_pointer_rtx)
-	emit_move_insn (stack_pointer_rtx, tmp);
-
-      /* Enlist allocate_dynamic_stack_space to pick up the pieces.  */
-      tmp = force_reg (Pmode, const0_rtx);
-      allocate_dynamic_stack_space (tmp, NULL_RTX, BIGGEST_ALIGNMENT);
-      seq = get_insns ();
-      end_sequence ();
-
-      for (tmp = get_last_insn (); tmp; tmp = PREV_INSN (tmp))
-	if (NOTE_P (tmp) && NOTE_LINE_NUMBER (tmp) == NOTE_INSN_FUNCTION_BEG)
-	  break;
-      if (tmp)
-	emit_insn_before (seq, tmp);
-      else
-	emit_insn (seq);
-    }
-#endif
+  /* APPLE LOCAL begin mainline 2006-02-17 4356747 stack realign */
+  /* deletion */
+  /* APPLE LOCAL end mainline 2006-02-17 4356747 stack realign */
+/* APPLE LOCAL begin mainline */
 
 #ifndef HAS_INIT_SECTION
   emit_library_call (init_one_libfunc (NAME__MAIN), LCT_NORMAL, VOIDmode, 0);
 #endif
 }
 
-/* The PENDING_SIZES represent the sizes of variable-sized types.
-   Create RTL for the various sizes now (using temporary variables),
-   so that we can refer to the sizes from the RTL we are generating
-   for the current function.  The PENDING_SIZES are a TREE_LIST.  The
-   TREE_VALUE of each node is a SAVE_EXPR.  */
+/* Expand code to initialize the stack_protect_guard.  This is invoked at
+   the beginning of a function to be protected.  */
+
+#ifndef HAVE_stack_protect_set
+# define HAVE_stack_protect_set         0
+# define gen_stack_protect_set(x,y)     (gcc_unreachable (), NULL_RTX)
+#endif
 
 void
-expand_pending_sizes (tree pending_sizes)
+stack_protect_prologue (void)
 {
-  tree tem;
+  tree guard_decl = targetm.stack_protect_guard ();
+  rtx x, y;
 
-  /* Evaluate now the sizes of any types declared among the arguments.  */
-  for (tem = pending_sizes; tem; tem = TREE_CHAIN (tem))
-    expand_expr (TREE_VALUE (tem), const0_rtx, VOIDmode, 0);
+  /* Avoid expand_expr here, because we don't want guard_decl pulled
+     into registers unless absolutely necessary.  And we know that
+     cfun->stack_protect_guard is a local stack slot, so this skips
+     all the fluff.  */
+  x = validize_mem (DECL_RTL (cfun->stack_protect_guard));
+  y = validize_mem (DECL_RTL (guard_decl));
+
+  /* Allow the target to copy from Y to X without leaking Y into a
+     register.  */
+  if (HAVE_stack_protect_set)
+    {
+      rtx insn = gen_stack_protect_set (x, y);
+      if (insn)
+        {
+          emit_insn (insn);
+          return;
+        }
+    }
+
+  /* Otherwise do a straight move.  */
+  emit_move_insn (x, y);
 }
 
+/* Expand code to verify the stack_protect_guard.  This is invoked at
+   the end of a function to be protected.  */
+
+#ifndef HAVE_stack_protect_test
+# define HAVE_stack_protect_test                0
+# define gen_stack_protect_test(x, y, z)        (gcc_unreachable (), NULL_RTX)
+#endif
+
+void
+stack_protect_epilogue (void)
+{
+  tree guard_decl = targetm.stack_protect_guard ();
+  rtx label = gen_label_rtx ();
+  rtx x, y, tmp;
+
+  /* Avoid expand_expr here, because we don't want guard_decl pulled
+     into registers unless absolutely necessary.  And we know that
+     cfun->stack_protect_guard is a local stack slot, so this skips
+     all the fluff.  */
+  x = validize_mem (DECL_RTL (cfun->stack_protect_guard));
+  y = validize_mem (DECL_RTL (guard_decl));
+
+  /* Allow the target to compare Y with X without leaking either into
+     a register.  */
+  switch (HAVE_stack_protect_test != 0)
+    {
+    case 1:
+      tmp = gen_stack_protect_test (x, y, label);
+      if (tmp)
+        {
+          emit_insn (tmp);
+          break;
+        }
+      /* FALLTHRU */
+
+    default:
+      emit_cmp_and_jump_insns (x, y, EQ, NULL_RTX, ptr_mode, 1, label);
+      break;
+    }
+
+  /* The noreturn predictor has been moved to the tree level.  The rtl-level
+     predictors estimate this branch about 20%, which isn't enough to get
+     things moved out of line.  Since this is the only extant case of adding
+     a noreturn function at the rtl level, it doesn't seem worth doing ought
+     except adding the prediction by hand.  */
+  tmp = get_last_insn ();
+  if (JUMP_P (tmp))
+    predict_insn_def (tmp, PRED_NORETURN, TAKEN);
+
+  expand_expr_stmt (targetm.stack_protect_fail ());
+  emit_label (label);
+}
+
+/* APPLE LOCAL end mainline */
 /* Start the RTL for a new function, and set variables used for
    emitting RTL.
    SUBR is the FUNCTION_DECL node.
@@ -4116,29 +4279,41 @@ expand_function_start (tree subr)
 	  SET_DECL_RTL (DECL_RESULT (subr), x);
 	}
     }
-  else if (DECL_MODE (DECL_RESULT (subr)) == VOIDmode)
+  /* APPLE LOCAL begin CW asm blocks */
+  else if (DECL_MODE (DECL_RESULT (subr)) == VOIDmode
+	   || cfun->iasm_asm_function)
+  /* APPLE LOCAL end CW asm blocks */
     /* If return mode is void, this decl rtl should not be used.  */
     SET_DECL_RTL (DECL_RESULT (subr), NULL_RTX);
   else
     {
       /* Compute the return values into a pseudo reg, which we will copy
 	 into the true return register after the cleanups are done.  */
-
-      /* In order to figure out what mode to use for the pseudo, we
-	 figure out what the mode of the eventual return register will
-	 actually be, and use that.  */
-      rtx hard_reg
-	= hard_function_value (TREE_TYPE (DECL_RESULT (subr)),
-			       subr, 1);
-
-      /* Structures that are returned in registers are not aggregate_value_p,
-	 so we may see a PARALLEL or a REG.  */
-      if (REG_P (hard_reg))
-	SET_DECL_RTL (DECL_RESULT (subr), gen_reg_rtx (GET_MODE (hard_reg)));
+      tree return_type = TREE_TYPE (DECL_RESULT (subr));
+      if (TYPE_MODE (return_type) != BLKmode
+	  && targetm.calls.return_in_msb (return_type))
+	/* expand_function_end will insert the appropriate padding in
+	   this case.  Use the return value's natural (unpadded) mode
+	   within the function proper.  */
+	SET_DECL_RTL (DECL_RESULT (subr),
+		      gen_reg_rtx (TYPE_MODE (return_type)));
       else
 	{
-	  gcc_assert (GET_CODE (hard_reg) == PARALLEL);
-	  SET_DECL_RTL (DECL_RESULT (subr), gen_group_rtx (hard_reg));
+	  /* In order to figure out what mode to use for the pseudo, we
+	     figure out what the mode of the eventual return register will
+	     actually be, and use that.  */
+	  rtx hard_reg = hard_function_value (return_type, subr, 1);
+
+	  /* Structures that are returned in registers are not
+	     aggregate_value_p, so we may see a PARALLEL or a REG.  */
+	  if (REG_P (hard_reg))
+	    SET_DECL_RTL (DECL_RESULT (subr),
+			  gen_reg_rtx (GET_MODE (hard_reg)));
+	  else
+	    {
+	      gcc_assert (GET_CODE (hard_reg) == PARALLEL);
+	      SET_DECL_RTL (DECL_RESULT (subr), gen_group_rtx (hard_reg));
+	    }
 	}
 
       /* Set DECL_REGISTER flag so that expand_function_end will copy the
@@ -4205,9 +4380,6 @@ expand_function_start (tree subr)
      should go, if we end up needing one.   Ensure we have a NOTE here
      since some things (like trampolines) get placed before this.  */
   tail_recursion_reentry = emit_note (NOTE_INSN_DELETED);
-
-  /* Evaluate now the sizes of any types declared among the arguments.  */
-  expand_pending_sizes (nreverse (get_pending_sizes ()));
 
   /* Make sure there is a line number after the function entry setup code.  */
   force_next_line_note ();
@@ -4352,6 +4524,11 @@ expand_function_end (void)
   clear_pending_stack_adjust ();
   do_pending_stack_adjust ();
 
+  /* APPLE LOCAL begin CW asm blocks */
+  if (cfun->iasm_asm_function)
+    expand_naked_return ();
+  /* APPLE LOCAL end CW asm blocks */ 
+
   /* @@@ This is a kludge.  We want to ensure that instructions that
      may trap are not moved into the epilogue by scheduling, because
      we don't always emit unwind information for the epilogue.
@@ -4388,30 +4565,13 @@ expand_function_end (void)
      is computed.  */
   clobber_after = get_last_insn ();
 
-  /* Output the label for the actual return from the function,
-     if one is expected.  This happens either because a function epilogue
-     is used instead of a return instruction, or because a return was done
-     with a goto in order to run local cleanups, or because of pcc-style
-     structure returning.  */
-  if (return_label)
-    emit_label (return_label);
+  /* Output the label for the actual return from the function.  */
+  emit_label (return_label);
 
   /* Let except.c know where it should emit the call to unregister
      the function context for sjlj exceptions.  */
   if (flag_exceptions && USING_SJLJ_EXCEPTIONS)
     sjlj_emit_function_exit_after (get_last_insn ());
-
-  /* If we had calls to alloca, and this machine needs
-     an accurate stack pointer to exit the function,
-     insert some code to save and restore the stack pointer.  */
-  if (! EXIT_IGNORE_STACK
-      && current_function_calls_alloca)
-    {
-      rtx tem = 0;
-
-      emit_stack_save (SAVE_FUNCTION, &tem, parm_birth_insn);
-      emit_stack_restore (SAVE_FUNCTION, tem, NULL_RTX);
-    }
 
   /* If scalar return value was computed in a pseudo-reg, or was a named
      return value that got dumped to the stack, copy that to the hard
@@ -4437,10 +4597,22 @@ expand_function_end (void)
 	  if (GET_MODE (real_decl_rtl) == BLKmode)
 	    PUT_MODE (real_decl_rtl, GET_MODE (decl_rtl));
 
+	  /* If a non-BLKmode return value should be padded at the least
+	     significant end of the register, shift it left by the appropriate
+	     amount.  BLKmode results are handled using the group load/store
+	     machinery.  */
+	  if (TYPE_MODE (TREE_TYPE (decl_result)) != BLKmode
+	      && targetm.calls.return_in_msb (TREE_TYPE (decl_result)))
+	    {
+	      emit_move_insn (gen_rtx_REG (GET_MODE (decl_rtl),
+					   REGNO (real_decl_rtl)),
+			      decl_rtl);
+	      shift_return_value (GET_MODE (decl_rtl), true, real_decl_rtl);
+	    }
 	  /* If a named return value dumped decl_return to memory, then
 	     we may need to re-do the PROMOTE_MODE signed/unsigned
 	     extension.  */
-	  if (GET_MODE (real_decl_rtl) != GET_MODE (decl_rtl))
+	  else if (GET_MODE (real_decl_rtl) != GET_MODE (decl_rtl))
 	    {
 	      int unsignedp = TYPE_UNSIGNED (TREE_TYPE (decl_result));
 
@@ -4528,6 +4700,24 @@ expand_function_end (void)
   /* Output the label for the naked return from the function.  */
   emit_label (naked_return_label);
 
+  /* APPLE LOCAL begin mainline */
+  /* If stack protection is enabled for this function, check the guard.  */
+  if (cfun->stack_protect_guard)
+    stack_protect_epilogue ();
+  /* APPLE LOCAL end mainline */
+
+  /* If we had calls to alloca, and this machine needs
+     an accurate stack pointer to exit the function,
+     insert some code to save and restore the stack pointer.  */
+  if (! EXIT_IGNORE_STACK
+      && current_function_calls_alloca)
+    {
+      rtx tem = 0;
+
+      emit_stack_save (SAVE_FUNCTION, &tem, parm_birth_insn);
+      emit_stack_restore (SAVE_FUNCTION, tem, NULL_RTX);
+    }
+
   /* ??? This should no longer be necessary since stupid is no longer with
      us, but there are some parts of the compiler (eg reload_combine, and
      sh mach_dep_reorg) that still try and compute their own lifetime info
@@ -4559,7 +4749,7 @@ get_arg_pointer_save_area (struct function *f)
       end_sequence ();
 
       push_topmost_sequence ();
-      emit_insn_after (seq, get_insns ());
+      emit_insn_after (seq, entry_of_function ());
       pop_topmost_sequence ();
     }
 

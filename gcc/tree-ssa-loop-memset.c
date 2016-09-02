@@ -1,4 +1,4 @@
-/* APPLE LOCAL begin loops-to-memset  (ENTIRE FILE!)  */
+/* APPLE LOCAL file loops-to-memset */
 /*  Loops to memset.
     Copyright (C) 2004 Free Software Foundation, Inc.
     Contributed by Andrew Pinski <apinski@apple.com>.
@@ -134,7 +134,9 @@ memset_analyze_data_refs (loop_vec_info loop_vinfo)
 	  
 	  if (TREE_CODE (memref) == INDIRECT_REF)
             {
-	      dr = vect_analyze_pointer_ref_access (memref, stmt, false);
+	      /* MERGE FIXME */
+	      abort ();
+	      /* dr = vect_analyze_pointer_ref_access (memref, stmt, false); */
 	      if (! dr)
 		return false; 
 	      symbl = DR_BASE_NAME (dr);	
@@ -727,5 +729,3 @@ tree_ssa_memset (struct loops *loops)
     }
   bitmap_clear (vars_to_rename);
 }
-
-/* APPLE LOCAL end loops-to-memset (ENTIRE FILE!)  */

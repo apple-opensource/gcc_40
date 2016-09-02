@@ -1,6 +1,6 @@
 /* Output dbx-format symbol table information from GNU compiler.
    Copyright (C) 1987, 1988, 1992, 1993, 1994, 1995, 1996, 1997, 1998,
-   1999, 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+   1999, 2000, 2001, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -88,6 +88,7 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "function.h"
 #include "target.h"
 #include "langhooks.h"
+#include "obstack.h"
 
 #ifdef XCOFF_DEBUGGING_INFO
 #include "xcoffout.h"
@@ -101,11 +102,19 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
   do {--debug_nesting; return (x);} while (0)
 
 #ifndef ASM_STABS_OP
-#define ASM_STABS_OP "\t.stabs\t"
+# ifdef XCOFF_DEBUGGING_INFO
+#  define ASM_STABS_OP "\t.stabx\t"
+# else
+#  define ASM_STABS_OP "\t.stabs\t"
+# endif
 #endif
 
 #ifndef ASM_STABN_OP
 #define ASM_STABN_OP "\t.stabn\t"
+#endif
+
+#ifndef ASM_STABD_OP
+#define ASM_STABD_OP "\t.stabd\t"
 #endif
 
 #ifndef DBX_TYPE_DECL_STABS_CODE
@@ -132,6 +141,10 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #define NO_DBX_BNSYM_ENSYM 0
 #endif
 
+#ifndef NO_DBX_MAIN_SOURCE_DIRECTORY
+#define NO_DBX_MAIN_SOURCE_DIRECTORY 0
+#endif
+
 #ifndef DBX_BLOCKS_FUNCTION_RELATIVE
 #define DBX_BLOCKS_FUNCTION_RELATIVE 0
 #endif
@@ -140,7 +153,16 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #define DBX_LINES_FUNCTION_RELATIVE 0
 #endif
 
-enum typestatus {TYPE_UNSEEN, TYPE_XREF, TYPE_DEFINED};
+#ifndef DBX_CONTIN_LENGTH
+#define DBX_CONTIN_LENGTH 80
+#endif
+
+#ifndef DBX_CONTIN_CHAR
+#define DBX_CONTIN_CHAR '\\'
+#endif
+
+/* APPLE LOCAL dbxout_type rewrite.  */
+enum typestatus {TYPE_UNSEEN, TYPE_XREF, TYPE_DEFINED, TYPE_QUEUED};
 
 /* Structure recording information about a C data type.
    The status element says whether we have yet output
@@ -154,6 +176,8 @@ struct typeinfo GTY(())
   enum typestatus status;
   int file_number;
   int type_number;
+  /* APPLE LOCAL dbxout_type rewrite.  */
+  int q_type_number;
 };
 
 /* Vector recording information about C data types.
@@ -173,12 +197,30 @@ static GTY(()) int typevec_len;
 
 static GTY(()) int next_type_number;
 
+/* APPLE LOCAL begin dbxout_type rewrite.  */
+struct  qualified_typeinfo GTY(())
+{
+  int pointer_type;
+  int function_type;
+  int file_type;
+  int reference_type;
+  int const_type;
+  int volatile_type;
+};
+
+static GTY ((length ("q_typevec_len"))) struct qualified_typeinfo *q_typevec;
+static GTY(()) int q_typevec_len;
+static GTY(()) int next_q_type_number;
+static int dbxout_next_q_type_number (void);
+/* APPLE LOCAL end dbxout_type rewrite.  */
 /* The C front end may call dbxout_symbol before dbxout_init runs.
    We save all such decls in this list and output them when we get
    to dbxout_init.  */
 
 static GTY(()) tree preinit_symbols;
 
+/* APPLE LOCAL 4215975 */
+static GTY(()) tree anon_place_holder;
 enum binclstatus {BINCL_NOT_REQUIRED, BINCL_PENDING, BINCL_PROCESSED};
 
 /* When using N_BINCL in dbx output, each type number is actually a
@@ -208,6 +250,10 @@ struct dbx_file
 static struct dbx_file *current_file;
 #endif
 
+/* APPLE LOCAL begin ss2 */
+/* This is the output file used by dbxout routines.  */
+static FILE *dbx_out_file;
+/* APPLE LOCAL end ss2 */
 /* This is the next file number to use.  */
 
 static GTY(()) int next_file_number;
@@ -281,42 +327,11 @@ static const char *base_input_file;
 #define DEBUGGER_ARG_OFFSET(OFFSET, X) (OFFSET)
 #endif
 
-/* These variables are for dbxout_symbol to communicate to
-   dbxout_finish_symbol.
-   current_sym_code is the symbol-type-code, a symbol N_... define in stab.h.
-   current_sym_value and current_sym_addr are two ways to address the
-   value to store in the symtab entry.
-   current_sym_addr if nonzero represents the value as an rtx.
-   If that is zero, current_sym_value is used.  This is used
-   when the value is an offset (such as for auto variables,
-   register variables and parms).  */
-
-static STAB_CODE_TYPE current_sym_code;
-static int current_sym_value;
-static rtx current_sym_addr;
-
-/* Number of chars of symbol-description generated so far for the
-   current symbol.  Used by CHARS and CONTIN.  */
-
-static int current_sym_nchars;
-
-/* Report having output N chars of the current symbol-description.  */
-
-#define CHARS(N) (current_sym_nchars += (N))
-
-/* Break the current symbol-description, generating a continuation,
-   if it has become long.  */
-
-#ifndef DBX_CONTIN_LENGTH
-#define DBX_CONTIN_LENGTH 80
-#endif
-
-#if DBX_CONTIN_LENGTH > 0
-#define CONTIN  \
-  do {if (current_sym_nchars > DBX_CONTIN_LENGTH) dbxout_continue ();} while (0)
-#else
-#define CONTIN do { } while (0)
-#endif
+/* This obstack holds the stab string currently being constructed.  We
+   build it up here, then write it out, so we can split long lines up
+   properly (see dbxout_finish_complex_stabs).  */
+static struct obstack stabstr_ob;
+static size_t stabstr_last_contin_point;
 
 #ifdef DBX_USE_BINCL
 static void emit_bincl_stab             (const char *c);
@@ -325,33 +340,47 @@ static void emit_pending_bincls         (void);
 static inline void emit_pending_bincls_if_required (void);
 
 static void dbxout_init (const char *);
-#ifndef DBX_OUTPUT_MAIN_SOURCE_DIRECTORY
-static unsigned int get_lang_number (void);
-#endif
+ 
 static void dbxout_finish (const char *);
 static void dbxout_start_source_file (unsigned, const char *);
 static void dbxout_end_source_file (unsigned);
 static void dbxout_typedefs (tree);
 static void dbxout_type_index (tree);
-#if DBX_CONTIN_LENGTH > 0
-static void dbxout_continue (void);
-#endif
 static void dbxout_args (tree);
 static void dbxout_type_fields (tree);
-static void dbxout_type_method_1 (tree, const char *);
+static void dbxout_type_method_1 (tree);
 static void dbxout_type_methods (tree);
 static void dbxout_range_type (tree);
-static void dbxout_type (tree, int);
+/* APPLE LOCAL begin dbxout_type rewrite.  */
+static bool dbxout_type (tree, int);
+static bool dbxout_partial_type (tree, tree);
+static void dbxout_complete_type (tree, tree);
+static void dbxout_type_xref (tree);
+static void dbxout_pointer_type (tree);
+static void dbxout_void_type (tree);
+static void dbxout_integer_type (tree);
+static void dbxout_real_type (tree);
+static void dbxout_char_type (tree);
+static void dbxout_boolean_type (tree);
+static void dbxout_complex_type (tree);
+static void dbxout_file_type (tree);
+static void dbxout_function_type (tree);
+static void dbxout_reference_type (tree);
+static int dbxout_reusable_type (tree);
+static void dbxout_note_q_type (tree);
+static void dbxout_next_type_number (tree);
+#ifdef DBX_NO_XREFS
+static bool dbxout_cross_ref_type_p (tree);
+#endif
+static void dbxout_type_with_name (tree);
+static void dbxout_queue_type (tree);
+static void dbxout_free_type_queue (void);
+/* APPLE LOCAL end dbxout_type rewrite.  */
 static bool print_int_cst_bounds_in_octal_p (tree);
-static void print_int_cst_octal (tree);
-static void print_octal (unsigned HOST_WIDE_INT, int);
-static void print_wide_int (HOST_WIDE_INT);
 static void dbxout_type_name (tree);
 static void dbxout_class_name_qualifiers (tree);
 static int dbxout_symbol_location (tree, tree, const char *, rtx);
 static void dbxout_symbol_name (tree, const char *, int);
-static void dbxout_prepare_symbol (tree);
-static void dbxout_finish_symbol (tree);
 static void dbxout_block (tree, int, tree);
 static void dbxout_global_decl (tree);
 static void dbxout_type_decl (tree, int);
@@ -362,8 +391,8 @@ static void dbxout_handle_pch (unsigned);
 
 static void dbxout_source_line (unsigned int, const char *);
 static void dbxout_begin_prologue (unsigned int, const char *);
-static void dbxout_source_file (FILE *, const char *);
-static void dbxout_function_end (void);
+static void dbxout_source_file (const char *);
+static void dbxout_function_end (tree);
 static void dbxout_begin_function (tree);
 static void dbxout_begin_block (unsigned, unsigned);
 static void dbxout_end_block (unsigned, unsigned);
@@ -395,10 +424,15 @@ const struct gcc_debug_hooks dbx_debug_hooks =
   dbxout_type_decl,			 /* type_decl */
   debug_nothing_tree_tree,               /* imported_module_or_decl */
   debug_nothing_tree,		         /* deferred_inline_function */
-  debug_nothing_tree,		         /* outlining_inline_function */
+  /* APPLE LOCAL begin mainline 2006-05-15 rewrite 4548482  */
+  debug_nothing_tree_loc,	         /* outlining_inline_function */
+  /* APPLE LOCAL end mainline 2006-05-15 rewrite 4548482  */
   debug_nothing_rtx,		         /* label */
   dbxout_handle_pch,		         /* handle_pch */
-  debug_nothing_rtx		         /* var_location */
+  debug_nothing_rtx,		         /* var_location */
+  /* APPLE LOCAL opt diary */
+  debug_nothing_od_msg_loc,              /* Optimization Diary Entry */
+  0                                      /* start_end_main_source_file */
 };
 #endif /* DBX_DEBUGGING_INFO  */
 
@@ -425,28 +459,576 @@ const struct gcc_debug_hooks xcoff_debug_hooks =
   dbxout_type_decl,			 /* type_decl */
   debug_nothing_tree_tree,               /* imported_module_or_decl */
   debug_nothing_tree,		         /* deferred_inline_function */
-  debug_nothing_tree,		         /* outlining_inline_function */
+  /* APPLE LOCAL begin mainline 2006-05-15 rewrite 4548482  */
+  debug_nothing_tree_loc,	         /* outlining_inline_function */
+  /* APPLE LOCAL end mainline 2006-05-15 rewrite 4548482  */
   debug_nothing_rtx,		         /* label */
   dbxout_handle_pch,		         /* handle_pch */
-  debug_nothing_rtx		         /* var_location */
+  debug_nothing_rtx,		         /* var_location */
+  /* APPLE LOCAL opt diary */
+  debug_nothing_od_msg_loc,              /* Optimization Diary Entry */
+  0                                      /* start_end_main_source_file */
 };
 #endif /* XCOFF_DEBUGGING_INFO  */
 
-#if defined (DBX_DEBUGGING_INFO)
+/* Numeric formatting helper macro.  Note that this does not handle
+   hexadecimal.  */
+#define NUMBER_FMT_LOOP(P, NUM, BASE)		\
+  do						\
+    {						\
+      int digit = NUM % BASE;			\
+      NUM /= BASE;				\
+      *--P = digit + '0';			\
+    }						\
+  while (NUM > 0)
+
+/* APPLE LOCAL ss2 */
+/* Utility: write a decimal integer NUM to dbx_out_file.  */
+void
+dbxout_int (int num)
+{
+  char buf[64];
+  char *p = buf + sizeof buf;
+  unsigned int unum;
+
+  if (num == 0)
+    {
+      /* APPLE LOCAL ss2 */
+      putc ('0', dbx_out_file);
+      return;
+    }
+  if (num < 0)
+    {
+      /* APPLE LOCAL ss2 */
+      putc ('-', dbx_out_file);
+      unum = -num;
+    }
+  else
+    unum = num;
+
+  NUMBER_FMT_LOOP (p, unum, 10);
+
+  while (p < buf + sizeof buf)
+    {
+      /* APPLE LOCAL ss2 */
+      putc (*p, dbx_out_file);
+      p++;
+    }
+}
+
+
+/* Primitives for emitting simple stabs directives.  All other stabs
+   routines should use these functions instead of directly emitting
+   stabs.  They are exported because machine-dependent code may need
+   to invoke them, e.g. in a DBX_OUTPUT_* macro whose definition
+   forwards to code in CPU.c.  */
+
+/* The following functions should all be called immediately after one
+   of the dbxout_begin_stab* functions (below).  They write out
+   various things as the value of a stab.  */
+
+/* Write out a literal zero as the value of a stab.  */
+void
+dbxout_stab_value_zero (void)
+{
+  /* APPLE LOCAL ss2 */
+  fputs ("0\n", dbx_out_file);
+}
+
+/* Write out the label LABEL as the value of a stab.  */
+void
+dbxout_stab_value_label (const char *label)
+{
+  /* APPLE LOCAL begin ss2 */
+  assemble_name (dbx_out_file, label);
+  putc ('\n', dbx_out_file);
+  /* APPLE LOCAL end ss2 */
+}
+
+/* Write out the difference of two labels, LABEL - BASE, as the value
+   of a stab.  */
+void
+dbxout_stab_value_label_diff (const char *label, const char *base)
+{
+  /* APPLE LOCAL begin ss2 */
+  assemble_name (dbx_out_file, label);
+  putc ('-', dbx_out_file);
+  assemble_name (dbx_out_file, base);
+  putc ('\n', dbx_out_file);
+  /* APPLE LOCAL end ss2 */
+}
+
+/* Write out an internal label as the value of a stab, and immediately
+   emit that internal label.  This should be used only when
+   dbxout_stabd will not work.  STEM is the name stem of the label,
+   COUNTERP is a pointer to a counter variable which will be used to
+   guarantee label uniqueness.  */
+void
+dbxout_stab_value_internal_label (const char *stem, int *counterp)
+{
+  char label[100];
+  int counter = counterp ? (*counterp)++ : 0;
+
+  ASM_GENERATE_INTERNAL_LABEL (label, stem, counter);
+  dbxout_stab_value_label (label);
+  /* APPLE LOCAL ss2 */
+  targetm.asm_out.internal_label (dbx_out_file, stem, counter);
+}
+
+/* Write out the difference between BASE and an internal label as the
+   value of a stab, and immediately emit that internal label.  STEM and
+   COUNTERP are as for dbxout_stab_value_internal_label.  */
+void
+dbxout_stab_value_internal_label_diff (const char *stem, int *counterp,
+				       const char *base)
+{
+  char label[100];
+  int counter = counterp ? (*counterp)++ : 0;
+
+  ASM_GENERATE_INTERNAL_LABEL (label, stem, counter);
+  dbxout_stab_value_label_diff (label, base);
+  /* APPLE LOCAL ss2 */
+  targetm.asm_out.internal_label (dbx_out_file, stem, counter);
+}
+
+/* The following functions produce specific kinds of stab directives.  */
+
+/* APPLE LOCAL ss2 */
+/* Write a .stabd directive with type STYPE and desc SDESC to dbx_out_file.  */
+void
+dbxout_stabd (int stype, int sdesc)
+{
+  /* APPLE LOCAL ss2 */
+  fputs (ASM_STABD_OP, dbx_out_file);
+  dbxout_int (stype);
+  /* APPLE LOCAL ss2 */
+  fputs (",0,", dbx_out_file);
+  dbxout_int (sdesc);
+  /* APPLE LOCAL ss2 */
+  putc ('\n', dbx_out_file);
+}
+
+/* Write a .stabn directive with type STYPE.  This function stops
+   short of emitting the value field, which is the responsibility of
+   the caller (normally it will be either a symbol or the difference
+   of two symbols).  */
+
+void
+dbxout_begin_stabn (int stype)
+{
+  /* APPLE LOCAL ss2 */
+  fputs (ASM_STABN_OP, dbx_out_file);
+  dbxout_int (stype);
+  /* APPLE LOCAL ss2 */
+  fputs (",0,0,", dbx_out_file);
+}
+
+/* Write a .stabn directive with type N_SLINE and desc LINE.  As above,
+   the value field is the responsibility of the caller.  */
+void
+dbxout_begin_stabn_sline (int lineno)
+{
+  /* APPLE LOCAL ss2 */
+  fputs (ASM_STABN_OP, dbx_out_file);
+  dbxout_int (N_SLINE);
+  /* APPLE LOCAL ss2 */
+  fputs (",0,", dbx_out_file);
+  dbxout_int (lineno);
+  /* APPLE LOCAL ss2 */
+  putc (',', dbx_out_file);
+}
+
+/* Begin a .stabs directive with string "", type STYPE, and desc and
+   other fields 0.  The value field is the responsibility of the
+   caller.  This function cannot be used for .stabx directives.  */
+void
+dbxout_begin_empty_stabs (int stype)
+{
+  /* APPLE LOCAL begin ss2 */
+  fputs (ASM_STABS_OP, dbx_out_file);
+  fputs ("\"\",", dbx_out_file);
+  /* APPLE LOCAL end ss2 */
+  dbxout_int (stype);
+  /* APPLE LOCAL ss2 */
+  fputs (",0,0,", dbx_out_file);
+}
+
+/* Begin a .stabs directive with string STR, type STYPE, and desc 0.
+   The value field is the responsibility of the caller.  */
+void
+dbxout_begin_simple_stabs (const char *str, int stype)
+{
+  /* APPLE LOCAL begin ss2 */
+  fputs (ASM_STABS_OP, dbx_out_file);
+  output_quoted_string (dbx_out_file, str);
+  putc (',', dbx_out_file);
+  /* APPLE LOCAL end ss2 */
+  dbxout_int (stype);
+  /* APPLE LOCAL ss2 */
+  fputs (",0,0,", dbx_out_file);
+}
+
+/* As above but use SDESC for the desc field.  */
+void
+dbxout_begin_simple_stabs_desc (const char *str, int stype, int sdesc)
+{
+  /* APPLE LOCAL begin ss2 */
+  fputs (ASM_STABS_OP, dbx_out_file);
+  output_quoted_string (dbx_out_file, str);
+  putc (',', dbx_out_file);
+  /* APPLE LOCAL end ss2 */
+  dbxout_int (stype);
+  /* APPLE LOCAL ss2 */
+  fputs (",0,", dbx_out_file);
+  dbxout_int (sdesc);
+  /* APPLE LOCAL ss2 */
+  putc (',', dbx_out_file);
+}
+
+/* The next set of functions are entirely concerned with production of
+   "complex" .stabs directives: that is, .stabs directives whose
+   strings have to be constructed piecemeal.  dbxout_type,
+   dbxout_symbol, etc. use these routines heavily.  The string is queued
+   up in an obstack, then written out by dbxout_finish_complex_stabs, which
+   is also responsible for splitting it up if it exceeds DBX_CONTIN_LENGTH.
+   (You might think it would be more efficient to go straight to stdio
+   when DBX_CONTIN_LENGTH is 0 (i.e. no length limit) but that turns
+   out not to be the case, and anyway this needs fewer #ifdefs.)  */
+
+/* Begin a complex .stabs directive.  If we can, write the initial
+   APPLE LOCAL ss2
+   ASM_STABS_OP to the dbx_out_file.  */
+
 static void
-dbxout_function_end (void)
+dbxout_begin_complex_stabs (void)
+{
+  emit_pending_bincls_if_required ();
+  FORCE_TEXT;
+  /* APPLE LOCAL ss2 */
+  fputs (ASM_STABS_OP, dbx_out_file);
+  /* APPLE LOCAL ss2 */
+  putc ('"', dbx_out_file);
+  gcc_assert (stabstr_last_contin_point == 0);
+}
+
+/* As above, but do not force text or emit pending bincls.  This is
+   used by dbxout_symbol_location, which needs to do something else.  */
+static void
+dbxout_begin_complex_stabs_noforcetext (void)
+{
+  /* APPLE LOCAL ss2 */
+  fputs (ASM_STABS_OP, dbx_out_file);
+  /* APPLE LOCAL ss2 */
+  putc ('"', dbx_out_file);
+  gcc_assert (stabstr_last_contin_point == 0);
+}
+
+/* Add CHR, a single character, to the string being built.  */
+#define stabstr_C(chr) obstack_1grow (&stabstr_ob, chr)
+
+/* Add STR, a normal C string, to the string being built.  */
+#define stabstr_S(str) obstack_grow (&stabstr_ob, str, strlen(str))
+
+/* Add the text of ID, an IDENTIFIER_NODE, to the string being built.  */
+/* APPLE LOCAL begin 4310696 */
+static void
+stabstr_I (tree id)
+{
+
+  if ((strcmp (lang_hooks.name, "GNU C++") == 0
+       || strcmp (lang_hooks.name, "GNU Objective-C++") == 0)
+      && IDENTIFIER_LENGTH (id) > 2
+      && strncmp ("$_", IDENTIFIER_POINTER (id), 2) == 0)
+    obstack_grow (&stabstr_ob, "$_", 2);
+  else  
+      obstack_grow (&stabstr_ob, IDENTIFIER_POINTER (id), IDENTIFIER_LENGTH (id));
+}
+/* APPLE LOCAL end 4310696 */
+/* Add NUM, a signed decimal number, to the string being built.  */
+static void
+stabstr_D (HOST_WIDE_INT num)
+{
+  char buf[64];
+  char *p = buf + sizeof buf;
+  unsigned int unum;
+
+  if (num == 0)
+    {
+      stabstr_C ('0');
+      return;
+    }
+  if (num < 0)
+    {
+      stabstr_C ('-');
+      unum = -num;
+    }
+  else
+    unum = num;
+
+  NUMBER_FMT_LOOP (p, unum, 10);
+
+  obstack_grow (&stabstr_ob, p, (buf + sizeof buf) - p);
+}
+
+/* Add NUM, an unsigned decimal number, to the string being built.  */
+static void
+stabstr_U (unsigned HOST_WIDE_INT num)
+{
+  char buf[64];
+  char *p = buf + sizeof buf;
+  if (num == 0)
+    {
+      stabstr_C ('0');
+      return;
+    }
+  NUMBER_FMT_LOOP (p, num, 10);
+  obstack_grow (&stabstr_ob, p, (buf + sizeof buf) - p);
+}
+
+/* Add CST, an INTEGER_CST tree, to the string being built as an
+   unsigned octal number.  This routine handles values which are
+   larger than a single HOST_WIDE_INT.  */
+static void
+stabstr_O (tree cst)
+{
+  unsigned HOST_WIDE_INT high = TREE_INT_CST_HIGH (cst);
+  unsigned HOST_WIDE_INT low = TREE_INT_CST_LOW (cst);
+
+  char buf[128];
+  char *p = buf + sizeof buf;
+
+  /* GDB wants constants with no extra leading "1" bits, so
+     we need to remove any sign-extension that might be
+     present.  */
+  {
+    const unsigned int width = TYPE_PRECISION (TREE_TYPE (cst));
+    if (width == HOST_BITS_PER_WIDE_INT * 2)
+      ;
+    else if (width > HOST_BITS_PER_WIDE_INT)
+      high &= (((HOST_WIDE_INT) 1 << (width - HOST_BITS_PER_WIDE_INT)) - 1);
+    else if (width == HOST_BITS_PER_WIDE_INT)
+      high = 0;
+    else
+      high = 0, low &= (((HOST_WIDE_INT) 1 << width) - 1);
+  }
+
+  /* Leading zero for base indicator.  */
+  stabstr_C ('0');
+
+  /* If the value is zero, the base indicator will serve as the value
+     all by itself.  */
+  if (high == 0 && low == 0)
+    return;
+
+  /* If the high half is zero, we need only print the low half normally.  */
+  if (high == 0)
+    NUMBER_FMT_LOOP (p, low, 8);
+  else
+    {
+      /* When high != 0, we need to print enough zeroes from low to
+	 give the digits from high their proper place-values.  Hence
+	 NUMBER_FMT_LOOP cannot be used.  */
+      const int n_digits = HOST_BITS_PER_WIDE_INT / 3;
+      int i;
+
+      for (i = 1; i <= n_digits; i++)
+	{
+	  unsigned int digit = low % 8;
+	  low /= 8;
+	  *--p = '0' + digit;
+	}
+
+      /* Octal digits carry exactly three bits of information.  The
+	 width of a HOST_WIDE_INT is not normally a multiple of three.
+	 Therefore, the next digit printed probably needs to carry
+	 information from both low and high.  */
+      if (HOST_BITS_PER_WIDE_INT % 3 != 0)
+	{
+	  const int n_leftover_bits = HOST_BITS_PER_WIDE_INT % 3;
+	  const int n_bits_from_high = 3 - n_leftover_bits;
+
+	  const unsigned HOST_WIDE_INT
+	    low_mask = (((unsigned HOST_WIDE_INT)1) << n_leftover_bits) - 1;
+	  const unsigned HOST_WIDE_INT
+	    high_mask = (((unsigned HOST_WIDE_INT)1) << n_bits_from_high) - 1;
+
+	  unsigned int digit;
+
+	  /* At this point, only the bottom n_leftover_bits bits of low
+	     should be set.  */
+	  gcc_assert (!(low & ~low_mask));
+
+	  digit = (low | ((high & high_mask) << n_leftover_bits));
+	  high >>= n_bits_from_high;
+
+	  *--p = '0' + digit;
+	}
+
+      /* Now we can format high in the normal manner.  However, if
+	 the only bits of high that were set were handled by the
+	 digit split between low and high, high will now be zero, and
+	 we don't want to print extra digits in that case.  */
+      if (high)
+	NUMBER_FMT_LOOP (p, high, 8);
+    }
+
+  obstack_grow (&stabstr_ob, p, (buf + sizeof buf) - p);
+}
+
+/* Called whenever it is safe to break a stabs string into multiple
+   .stabs directives.  If the current string has exceeded the limit
+   set by DBX_CONTIN_LENGTH, mark the current position in the buffer
+   as a continuation point by inserting DBX_CONTIN_CHAR (doubled if
+   it is a backslash) and a null character.  */
+static inline void
+stabstr_continue (void)
+{
+  if (DBX_CONTIN_LENGTH > 0
+      && obstack_object_size (&stabstr_ob) - stabstr_last_contin_point
+	 > DBX_CONTIN_LENGTH)
+    {
+      if (DBX_CONTIN_CHAR == '\\')
+	obstack_1grow (&stabstr_ob, '\\');
+      obstack_1grow (&stabstr_ob, DBX_CONTIN_CHAR);
+      obstack_1grow (&stabstr_ob, '\0');
+      stabstr_last_contin_point = obstack_object_size (&stabstr_ob);
+    }
+}
+#define CONTIN stabstr_continue ()
+
+/* Macro subroutine of dbxout_finish_complex_stabs, which emits
+   all of the arguments to the .stabs directive after the string.
+   Overridden by xcoffout.h.  CODE is the stabs code for this symbol;
+   LINE is the source line to write into the desc field (in extended
+   mode); SYM is the symbol itself.
+
+   ADDR, LABEL, and NUMBER are three different ways to represent the
+   stabs value field.  At most one of these should be nonzero.
+
+     ADDR is used most of the time; it represents the value as an
+     RTL address constant.
+
+     LABEL is used (currently) only for N_CATCH stabs; it represents
+     the value as a string suitable for assemble_name.
+
+     NUMBER is used when the value is an offset from an implicit base
+     pointer (e.g. for a stack variable), or an index (e.g. for a
+     register variable).  It represents the value as a decimal integer.  */
+
+#ifndef DBX_FINISH_STABS
+#define DBX_FINISH_STABS(SYM, CODE, LINE, ADDR, LABEL, NUMBER)	\
+do {								\
+  int line_ = use_gnu_debug_info_extensions ? LINE : 0;		\
+/* APPLE LOCAL begin ss2 */                                     \
+  dbxout_int (CODE);						\
+  fputs (",0,", dbx_out_file);					\
+  dbxout_int (line_);						\
+  putc (',', dbx_out_file);					\
+  if (ADDR)							\
+    output_addr_const (dbx_out_file, ADDR);			\
+  else if (LABEL)						\
+    assemble_name (dbx_out_file, LABEL);			\
+  else								\
+    dbxout_int (NUMBER);					\
+  putc ('\n', dbx_out_file);					\
+/* APPLE LOCAL end ss2 */                                       \
+} while (0)
+#endif
+
+/* Finish the emission of a complex .stabs directive.  When DBX_CONTIN_LENGTH
+   is zero, this has only to emit the close quote and the remainder of
+   the arguments.  When it is nonzero, the string has been marshalled in
+   stabstr_ob, and this routine is responsible for breaking it up into
+   DBX_CONTIN_LENGTH-sized chunks.
+
+   SYM is the DECL of the symbol under consideration; it is used only
+   for its DECL_SOURCE_LINE.  The other arguments are all passed directly
+   to DBX_FINISH_STABS; see above for details.  */
+   
+static void
+dbxout_finish_complex_stabs (tree sym, STAB_CODE_TYPE code,
+			     rtx addr, const char *label, int number)
+{
+  int line ATTRIBUTE_UNUSED;
+  char *str;
+  size_t len;
+
+  line = sym ? DECL_SOURCE_LINE (sym) : 0;
+  if (DBX_CONTIN_LENGTH > 0)
+    {
+      char *chunk;
+      size_t chunklen;
+
+      /* Nul-terminate the growing string, then get its size and
+	 address.  */
+      obstack_1grow (&stabstr_ob, '\0');
+
+      len = obstack_object_size (&stabstr_ob);
+      chunk = str = obstack_finish (&stabstr_ob);
+
+      /* Within the buffer are a sequence of NUL-separated strings,
+	 each of which is to be written out as a separate stab
+	 directive.  */
+      for (;;)
+	{
+	  chunklen = strlen (chunk);
+	  /* APPLE LOCAL ss2 */
+	  fwrite (chunk, 1, chunklen, dbx_out_file);
+	  /* APPLE LOCAL ss2 */
+	  fputs ("\",", dbx_out_file);
+
+	  /* Must add an extra byte to account for the NUL separator.  */
+	  chunk += chunklen + 1;
+	  len   -= chunklen + 1;
+
+	  /* Only put a line number on the last stab in the sequence.  */
+	  DBX_FINISH_STABS (sym, code, len == 0 ? line : 0,
+			    addr, label, number);
+	  if (len == 0)
+	    break;
+
+	  /* APPLE LOCAL ss2 */
+	  fputs (ASM_STABS_OP, dbx_out_file);
+	  /* APPLE LOCAL ss2 */
+	  putc ('"', dbx_out_file);
+	}
+      stabstr_last_contin_point = 0;
+    }
+  else
+    {
+      /* No continuations - we can put the whole string out at once.
+	 It is faster to augment the string with the close quote and
+	 comma than to do a two-character fputs.  */
+      obstack_grow (&stabstr_ob, "\",", 2);
+      len = obstack_object_size (&stabstr_ob);
+      str = obstack_finish (&stabstr_ob);
+      
+      /* APPLE LOCAL ss2 */
+      fwrite (str, 1, len, dbx_out_file);
+      DBX_FINISH_STABS (sym, code, line, addr, label, number);
+    }
+  obstack_free (&stabstr_ob, str);
+}
+
+#if defined (DBX_DEBUGGING_INFO)
+
+static void
+dbxout_function_end (tree decl)
 {
   char lscope_label_name[100];
 
+  /* APPLE LOCAL dbxout_type rewrite.  */
+  dbxout_flush_type_queue ();
   /* The Lscope label must be emitted even if we aren't doing anything
      else; dbxout_block needs it.  */
   function_section (current_function_decl);
   
-  /* Convert Ltext into the appropriate format for local labels in case
+  /* Convert Lscope into the appropriate format for local labels in case
      the system doesn't insert underscores in front of user generated
      labels.  */
   ASM_GENERATE_INTERNAL_LABEL (lscope_label_name, "Lscope", scope_labelno);
-  targetm.asm_out.internal_label (asm_out_file, "Lscope", scope_labelno);
+  /* APPLE LOCAL ss2 */
+  targetm.asm_out.internal_label (dbx_out_file, "Lscope", scope_labelno);
   scope_labelno++;
 
   /* The N_FUN tag at the end of the function is a GNU extension,
@@ -454,30 +1036,34 @@ dbxout_function_end (void)
      named sections.  */
   if (!use_gnu_debug_info_extensions
       || NO_DBX_FUNCTION_END
-      || !targetm.have_named_sections)
+      || !targetm.have_named_sections
+      || DECL_IGNORED_P (decl))
     return;
 
   /* By convention, GCC will mark the end of a function with an N_FUN
      symbol and an empty string.  */
 #ifdef DBX_OUTPUT_NFUN
-  DBX_OUTPUT_NFUN (asm_out_file, lscope_label_name, current_function_decl);
+  /* APPLE LOCAL ss2 */
+  DBX_OUTPUT_NFUN (dbx_out_file, lscope_label_name, current_function_decl);
 #else
-  fprintf (asm_out_file, "%s\"\",%d,0,0,", ASM_STABS_OP, N_FUN);
-  assemble_name (asm_out_file, lscope_label_name);
-  putc ('-', asm_out_file);
-  assemble_name (asm_out_file, XSTR (XEXP (DECL_RTL (current_function_decl), 0), 0));
-  fprintf (asm_out_file, "\n");
+  dbxout_begin_empty_stabs (N_FUN);
+  dbxout_stab_value_label_diff (lscope_label_name,
+				XSTR (XEXP (DECL_RTL (current_function_decl), 0), 0));
+				
 #endif
 
-  if (!NO_DBX_BNSYM_ENSYM && !flag_debug_only_used_symbols)
-    fprintf (asm_out_file, "%s%d,0,0\n", ASM_STABD_OP, N_ENSYM);
+  /* APPLE LOCAL begin Essential Symbols */
+  if (!NO_DBX_BNSYM_ENSYM)
+    {
+      dbxout_flush_type_queue ();
+      dbxout_stabd (N_ENSYM, 0);
+    }
+  /* APPLE LOCAL end Essential Symbols */
 }
 #endif /* DBX_DEBUGGING_INFO */
 
-#ifndef DBX_OUTPUT_MAIN_SOURCE_DIRECTORY
 /* Get lang description for N_SO stab.  */
-
-static unsigned int
+static unsigned int ATTRIBUTE_UNUSED
 get_lang_number (void)
 {
   const char *language_string = lang_hooks.name;
@@ -494,15 +1080,14 @@ get_lang_number (void)
     return N_SO_PASCAL;
   else if (strcmp (language_string, "GNU Objective-C") == 0)
     return N_SO_OBJC;
-  /* APPLE LOCAL begin Objective-C++ */
+  /* APPLE LOCAL begin mainline */
   else if (strcmp (language_string, "GNU Objective-C++") == 0)
     return N_SO_OBJCPLUS;
-  /* APPLE LOCAL end Objective-C++ */
+  /* APPLE LOCAL end mainline */
   else
     return 0;
 
 }
-#endif
 
 /* At the beginning of compilation, start writing the symbol table.
    Initialize `typevec' and output the standard data types of C.  */
@@ -511,10 +1096,34 @@ static void
 dbxout_init (const char *input_file_name)
 {
   char ltext_label_name[100];
+  bool used_ltext_label_name = false;
   tree syms = lang_hooks.decls.getdecls ();
 
   typevec_len = 100;
   typevec = ggc_calloc (typevec_len, sizeof typevec[0]);
+
+  /* APPLE LOCAL begin dbxout_type rewrite.  */
+  q_typevec_len = 100;
+  q_typevec = ggc_calloc (q_typevec_len, sizeof q_typevec[0]);
+  /* APPLE LOCAL end dbxout_type rewrite.  */
+  /* APPLE LOCAL begin ss2 */
+  /* Open dbx_out_file */
+  if (flag_save_repository
+      && flag_pch_file 
+      && !flag_debug_only_used_symbols
+      && asm_file_name 
+      && strcmp (asm_file_name, "-"))
+    {
+      dbx_out_file = fopen (asm_file_name, "w+b");
+      if (dbx_out_file == 0)
+	fatal_error ("can%'t open %s for writing: %m", asm_file_name);
+    }
+  else
+    dbx_out_file = asm_out_file;
+  /* APPLE LOCAL end ss2 */
+  /* stabstr_ob contains one string, which will be just fine with
+     1-byte alignment.  */
+  obstack_specify_allocation (&stabstr_ob, 0, 1, xmalloc, free);
 
   /* Convert Ltext into the appropriate format for local labels in case
      the system doesn't insert underscores in front of user generated
@@ -522,7 +1131,7 @@ dbxout_init (const char *input_file_name)
   ASM_GENERATE_INTERNAL_LABEL (ltext_label_name, "Ltext", 0);
 
   /* Put the current working directory in an N_SO symbol.  */
-  if (use_gnu_debug_info_extensions)
+  if (use_gnu_debug_info_extensions && !NO_DBX_MAIN_SOURCE_DIRECTORY)
     {
       static const char *cwd;
 
@@ -534,40 +1143,42 @@ dbxout_init (const char *input_file_name)
 	  else if (!IS_DIR_SEPARATOR (cwd[strlen (cwd) - 1]))
 	    cwd = concat (cwd, "/", NULL);
 	}
-
 #ifdef DBX_OUTPUT_MAIN_SOURCE_DIRECTORY
-      DBX_OUTPUT_MAIN_SOURCE_DIRECTORY (asm_out_file, cwd);
+      /* APPLE LOCAL ss2 */
+      DBX_OUTPUT_MAIN_SOURCE_DIRECTORY (dbx_out_file, cwd);
 #else /* no DBX_OUTPUT_MAIN_SOURCE_DIRECTORY */
-      fprintf (asm_out_file, "%s", ASM_STABS_OP);
-      output_quoted_string (asm_out_file, cwd);
-      fprintf (asm_out_file, ",%d,0,%d,", N_SO, get_lang_number ());
-      assemble_name (asm_out_file, ltext_label_name);
-      fputc ('\n', asm_out_file);
+      dbxout_begin_simple_stabs_desc (cwd, N_SO, get_lang_number ());
+      dbxout_stab_value_label (ltext_label_name);
+      used_ltext_label_name = true;
 #endif /* no DBX_OUTPUT_MAIN_SOURCE_DIRECTORY */
     }
 
 #ifdef DBX_OUTPUT_MAIN_SOURCE_FILENAME
-  DBX_OUTPUT_MAIN_SOURCE_FILENAME (asm_out_file, input_file_name);
-#else /* no DBX_OUTPUT_MAIN_SOURCE_FILENAME */
-  /* We include outputting `Ltext:' here,
-     because that gives you a way to override it.  */
-  /* Used to put `Ltext:' before the reference, but that loses on sun 4.  */
-  fprintf (asm_out_file, "%s", ASM_STABS_OP);
-  output_quoted_string (asm_out_file, input_file_name);
-  fprintf (asm_out_file, ",%d,0,%d,", N_SO, get_lang_number ());
-  assemble_name (asm_out_file, ltext_label_name);
-  fputc ('\n', asm_out_file);
-  text_section ();
-  targetm.asm_out.internal_label (asm_out_file, "Ltext", 0);
-#endif /* no DBX_OUTPUT_MAIN_SOURCE_FILENAME */
-
-#ifdef DBX_OUTPUT_GCC_MARKER
-  DBX_OUTPUT_GCC_MARKER (asm_out_file);
+  /* APPLE LOCAL ss2 */
+  DBX_OUTPUT_MAIN_SOURCE_FILENAME (dbx_out_file, input_file_name);
 #else
+  dbxout_begin_simple_stabs_desc (input_file_name, N_SO, get_lang_number ());
+  dbxout_stab_value_label (ltext_label_name);
+  used_ltext_label_name = true;
+#endif
+
+  if (used_ltext_label_name)
+    {
+      text_section ();
+      /* APPLE LOCAL ss2 */
+      targetm.asm_out.internal_label (dbx_out_file, "Ltext", 0);
+    }
+
+  /* APPLE LOCAL begin symbol separation, dwarf 4386531 */
+  dbxout_begin_empty_stabs (N_OSO);
+  dbxout_stab_value_zero ();
+  /* APPLE LOCAL end symbol separation, dwarf 4386531 */
+
   /* Emit an N_OPT stab to indicate that this file was compiled by GCC.
      The string used is historical.  */
-  fprintf (asm_out_file, "%s\"gcc2_compiled.\",%d,0,0,0\n",
-	   ASM_STABS_OP, N_OPT);
+#ifndef NO_DBX_GCC_MARKER
+  dbxout_begin_simple_stabs ("gcc2_compiled.", N_OPT);
+  dbxout_stab_value_zero ();
 #endif
 
   base_input_file = lastfile = input_file_name;
@@ -585,19 +1196,12 @@ dbxout_init (const char *input_file_name)
   current_file->pending_bincl_name = NULL;
 #endif
 
-  /* Make sure that types `int' and `char' have numbers 1 and 2.
-     Definitions of other integer types will refer to those numbers.
-     (Actually it should no longer matter what their numbers are.
-     Also, if any types with tags have been defined, dbxout_symbol
-     will output them first, so the numbers won't be 1 and 2.  That
-     happens in C++.  So it's a good thing it should no longer matter).  */
-
-/* APPLE LOCAL gdb only used symbols */
+/* APPLE LOCAL begin gdb only used symbols */
 #ifndef DBX_ONLY_USED_SYMBOLS
       dbxout_symbol (TYPE_NAME (integer_type_node), 0);
       dbxout_symbol (TYPE_NAME (char_type_node), 0);
-/* APPLE LOCAL gdb only used symbols */
 #endif
+/* APPLE LOCAL end gdb only used symbols */
 
   /* Get all permanent types that have typedef names, and output them
      all, except for those already output.  Some language front ends
@@ -613,6 +1217,12 @@ dbxout_init (const char *input_file_name)
 	dbxout_symbol (TREE_VALUE (t), 0);
       preinit_symbols = 0;
     }
+  /* APPLE LOCAL begin dbxout_type rewrite.  */
+  dbxout_queue_type (void_type_node);
+  dbxout_flush_type_queue ();
+  /* APPLE LOCAL end dbxout_type rewrite.  */
+  /* APPLE LOCAL 4215975 */
+  anon_place_holder = get_identifier ("__anon__");
 }
 
 /* Output any typedef names for types described by TYPE_DECLs in SYMS.  */
@@ -639,9 +1249,29 @@ dbxout_typedefs (tree syms)
 static void
 emit_bincl_stab (const char *name)
 {
-  fprintf (asm_out_file, "%s", ASM_STABS_OP);
-  output_quoted_string (asm_out_file, name);
-  fprintf (asm_out_file, ",%d,0,0,0\n", N_BINCL);
+  /* APPLE LOCAL ss2 */
+  static unsigned int dbx_checksum;
+  dbxout_begin_simple_stabs (name, N_BINCL);
+  
+  /* APPLE LOCAL begin ss2 */
+  if (flag_save_repository 
+      && flag_pch_file 
+      && !flag_debug_only_used_symbols)
+    {
+      /* Include dummy checksum with BINCL stab while creating
+	 symbol repoistory. Add corrosponding EXCL stab in
+	 asm file.  */
+      dbx_checksum = crc32_string (42, name);
+      
+      fprintf (asm_out_file, "%s", ASM_STABS_OP);
+      output_quoted_string (asm_out_file, name);
+      fprintf (asm_out_file, ",%d,0,0,%d\n", N_EXCL, dbx_checksum);
+
+      fprintf (dbx_out_file, "%d\n", dbx_checksum);
+    }
+  else
+    dbxout_stab_value_zero ();
+  /* APPLE LOCAL end ss2 */
 }
 
 /* If there are pending bincls then it is time to emit all of them.  */
@@ -701,6 +1331,8 @@ dbxout_start_source_file (unsigned int line ATTRIBUTE_UNUSED,
 #ifdef DBX_USE_BINCL
   struct dbx_file *n = xmalloc (sizeof *n);
 
+  /* APPLE LOCAL dbxout_type rewrite.  */
+  dbxout_flush_type_queue ();
   n->next = current_file;
   n->next_type_number = 1;
   /* Do not assign file number now. 
@@ -720,10 +1352,19 @@ dbxout_start_source_file (unsigned int line ATTRIBUTE_UNUSED,
 static void
 dbxout_end_source_file (unsigned int line ATTRIBUTE_UNUSED)
 {
+  /* APPLE LOCAL dbxout_type rewrite.  */
+  dbxout_flush_type_queue ();
 #ifdef DBX_USE_BINCL
+  /* APPLE LOCAL begin 4547137 */
+  if (!current_file)
+    return;
+  /* APPLE LOCAL end 4547137 */
   /* Emit EINCL stab only if BINCL is not pending.  */
   if (current_file->bincl_status == BINCL_PROCESSED)
-    fprintf (asm_out_file, "%s%d,0,0,0\n", ASM_STABN_OP, N_EINCL);
+    {
+      dbxout_begin_stabn (N_EINCL);
+      dbxout_stab_value_zero ();
+    }
   current_file->bincl_status = BINCL_NOT_REQUIRED;
   current_file = current_file->next;
 #endif
@@ -758,7 +1399,7 @@ dbxout_handle_pch (unsigned at_end)
 /* Output debugging info to FILE to switch to sourcefile FILENAME.  */
 
 static void
-dbxout_source_file (FILE *file, const char *filename)
+dbxout_source_file (const char *filename)
 {
   if (lastfile == 0 && lastfile_is_base)
     {
@@ -768,22 +1409,12 @@ dbxout_source_file (FILE *file, const char *filename)
 
   if (filename && (lastfile == 0 || strcmp (filename, lastfile)))
     {
-      char ltext_label_name[100];
-
-      ASM_GENERATE_INTERNAL_LABEL (ltext_label_name, "Ltext",
-				   source_label_number);
-      fprintf (file, "%s", ASM_STABS_OP);
-      output_quoted_string (file, filename);
-      /* APPLE LOCAL STABS SOL address suppression (radar 3109828) */
-      fprintf (file, ",%d,0,0,0\n", N_SOL);
       /* Don't change section amid function.  */
-      if (current_function_decl == NULL_TREE
-	  /* APPLE LOCAL hot/cold partitioning  */
-	  && !flag_reorder_blocks_and_partition)
+      if (current_function_decl == NULL_TREE)
 	text_section ();
 
-      targetm.asm_out.internal_label (file, "Ltext", source_label_number);
-      source_label_number++;
+      dbxout_begin_simple_stabs (filename, N_SOL);
+      dbxout_stab_value_internal_label ("Ltext", &source_label_number);
       lastfile = filename;
     }
 }
@@ -795,9 +1426,9 @@ dbxout_begin_prologue (unsigned int lineno, const char *filename)
 {
   if (use_gnu_debug_info_extensions
       && !NO_DBX_FUNCTION_END
-      && !NO_DBX_BNSYM_ENSYM
-      && !flag_debug_only_used_symbols)
-    fprintf (asm_out_file, "%s%d,0,0\n", ASM_STABD_OP, N_BNSYM);
+      /* APPLE LOCAL Essential Symbols */
+      && !NO_DBX_BNSYM_ENSYM)
+    dbxout_stabd (N_BNSYM, 0);
 
   dbxout_source_line (lineno, filename);
 }
@@ -808,29 +1439,22 @@ dbxout_begin_prologue (unsigned int lineno, const char *filename)
 static void
 dbxout_source_line (unsigned int lineno, const char *filename)
 {
-  dbxout_source_file (asm_out_file, filename);
+  dbxout_source_file (filename);
 
 #ifdef DBX_OUTPUT_SOURCE_LINE
-  dbxout_source_line_counter += 1;
-  DBX_OUTPUT_SOURCE_LINE (asm_out_file, lineno, dbxout_source_line_counter);
+  /* APPLE LOCAL ss2 */
+  DBX_OUTPUT_SOURCE_LINE (dbx_out_file, lineno, dbxout_source_line_counter);
 #else
   if (DBX_LINES_FUNCTION_RELATIVE)
     {
-      char label[100];
-      dbxout_source_line_counter += 1;
+      rtx begin_label = XEXP (DECL_RTL (current_function_decl), 0);
+      dbxout_begin_stabn_sline (lineno);
+      dbxout_stab_value_internal_label_diff ("LM", &dbxout_source_line_counter,
+					     XSTR (begin_label, 0));
 
-      ASM_GENERATE_INTERNAL_LABEL (label, "LM", dbxout_source_line_counter);
-      fprintf (asm_out_file, "%s%d,0,%d,", ASM_STABN_OP, N_SLINE, lineno);
-      assemble_name (asm_out_file, label);
-      putc ('-', asm_out_file);
-      assemble_name (asm_out_file,
-		     XSTR (XEXP (DECL_RTL (current_function_decl), 0), 0));
-      putc ('\n', asm_out_file);
-      targetm.asm_out.internal_label (asm_out_file, "LM",
-				      dbxout_source_line_counter);
     }
   else
-    fprintf (asm_out_file, "%s%d,0,%d\n", ASM_STABD_OP, N_SLINE, lineno);
+    dbxout_stabd (N_SLINE, lineno);
 #endif
 }
 
@@ -840,7 +1464,8 @@ static void
 dbxout_begin_block (unsigned int line ATTRIBUTE_UNUSED, unsigned int n)
 {
   emit_pending_bincls_if_required ();
-  targetm.asm_out.internal_label (asm_out_file, "LBB", n);
+  /* APPLE LOCAL ss2 */
+  targetm.asm_out.internal_label (dbx_out_file, "LBB", n);
 }
 
 /* Describe the end line-number of an internal block within a function.  */
@@ -849,7 +1474,8 @@ static void
 dbxout_end_block (unsigned int line ATTRIBUTE_UNUSED, unsigned int n)
 {
   emit_pending_bincls_if_required ();
-  targetm.asm_out.internal_label (asm_out_file, "LBE", n);
+  /* APPLE LOCAL ss2 */
+  targetm.asm_out.internal_label (dbx_out_file, "LBE", n);
 }
 
 /* Output dbx data for a function definition.
@@ -866,7 +1492,7 @@ dbxout_function_decl (tree decl)
   dbxout_begin_function (decl);
 #endif
   dbxout_block (DECL_INITIAL (decl), 0, DECL_ARGUMENTS (decl));
-  dbxout_function_end ();
+  dbxout_function_end (decl);
 }
 
 #endif /* DBX_DEBUGGING_INFO  */
@@ -901,60 +1527,170 @@ dbxout_type_decl (tree decl, int local)
 static void
 dbxout_finish (const char *filename ATTRIBUTE_UNUSED)
 {
+  /* APPLE LOCAL dbxout_type rewrite.  */
+  dbxout_free_type_queue ();
 #ifdef DBX_OUTPUT_MAIN_SOURCE_FILE_END
-  DBX_OUTPUT_MAIN_SOURCE_FILE_END (asm_out_file, filename);
+  /* APPLE LOCAL ss2 */
+  DBX_OUTPUT_MAIN_SOURCE_FILE_END (dbx_out_file, filename);
 #elif defined DBX_OUTPUT_NULL_N_SO_AT_MAIN_SOURCE_FILE_END
  {
-   char letext_label[100];
-   ASM_GENERATE_INTERNAL_LABEL (letext_label, "Letext", 0);
-   /* APPLE LOCAL STABS */
    text_section ();
-   fprintf (asm_out_file, "%s\"\",%d,0,0,", ASM_STABS_OP, N_SO);
-   assemble_name (asm_out_file, letext_label);
-   putc ('\n', asm_out_file);
-   targetm.asm_out.internal_label (asm_out_file, "Letext", 0);
+   dbxout_begin_empty_stabs (N_SO);
+   dbxout_stab_value_internal_label ("Letext", 0);
  }
 #endif
   debug_free_queue ();
+
+  /* APPLE LOCAL begin ss2 */
+  if (flag_save_repository
+      && flag_pch_file && !flag_debug_only_used_symbols)
+    {
+      /* Close dbx_out_file now here. toplev.c takes care of asm file.  */
+      if (ferror (dbx_out_file) != 0)
+	fatal_error ("error writing to %s: %m", asm_file_name);
+      if (fclose (dbx_out_file) != 0)
+	fatal_error ("error closing %s: %m", asm_file_name);
+    }
+}
+  /* APPLE LOCAL end ss2 */
+
+/* APPLE LOCAL begin dbxout_type rewrite.  */
+/* If TYPE is a qualified type then note this info in
+   q_typevec.  */
+static void
+dbxout_note_q_type (tree type)
+{
+  tree ttype = TREE_TYPE (type);
+  int t_number = TYPE_SYMTAB_ADDRESS (type);
+  int tt_number = TYPE_SYMTAB_ADDRESS (ttype);
+  int q_number = typevec[t_number].q_type_number;
+
+  /* consts and volatiles are not yet handled.  */
+  if (TYPE_QUALS (type))
+    return;
+
+  if (q_number == 0)
+    q_number = dbxout_next_q_type_number ();
+
+  switch (TREE_CODE (type))
+    {
+    case FUNCTION_TYPE:
+      if (q_typevec[q_number].function_type == 0)
+	{
+	  q_typevec[q_number].function_type = t_number;
+	  typevec[tt_number].q_type_number = q_number;
+	}
+      break;
+    case FILE_TYPE:
+      if (q_typevec[q_number].file_type == 0)
+	{
+	  q_typevec[q_number].file_type = t_number;
+	  typevec[tt_number].q_type_number = q_number;
+	}
+      break;
+    case POINTER_TYPE:
+      if (q_typevec[q_number].pointer_type == 0)
+	{
+	  q_typevec[q_number].pointer_type = t_number;
+	  typevec[tt_number].q_type_number = q_number;
+	}
+      break;
+    case REFERENCE_TYPE:
+      if (q_typevec[q_number].reference_type == 0)
+	{
+	  q_typevec[q_number].reference_type = t_number;
+	  typevec[tt_number].q_type_number = q_number;
+	}
+      break;
+    default:
+      gcc_unreachable ();
+      break;
+    }
 }
 
+/* Returned q_typevec index number for TYPE if it is
+   reusuable.
+   If TYPE is a FUNCTION_TYPE of VOID_TYPE and if we
+   have already seen another  FUNCTION_TYPE OTHER_TYPE whose 
+   type is also VOID_TYPE  then we can reuse OTHER_TYPE's type 
+   number for TYPE.  */
+static int 
+dbxout_reusable_type (tree type)
+{
+  tree t;
+  int q_no = 0;
+  /* consts and volatiles are not yet handled.  */
+  if (TYPE_QUALS (type))
+    return 0;
+
+  t = TREE_TYPE (type);
+  if (t && TYPE_SYMTAB_ADDRESS (t) == 0)
+    return 0;
+
+  switch (TREE_CODE (type))
+    {
+    case FUNCTION_TYPE:
+      q_no = typevec[TYPE_SYMTAB_ADDRESS (t)].q_type_number;
+      if (q_no && q_typevec[q_no].function_type)
+	return q_typevec[q_no].function_type;
+      break;
+    case FILE_TYPE:
+      q_no = typevec[TYPE_SYMTAB_ADDRESS (t)].q_type_number;
+      if (q_no && q_typevec[q_no].file_type)
+	return q_typevec[q_no].file_type;
+      break;
+    case POINTER_TYPE:
+      q_no = typevec[TYPE_SYMTAB_ADDRESS (t)].q_type_number;
+      if (q_no && q_typevec[q_no].pointer_type)
+	return q_typevec[q_no].pointer_type;
+      break;
+    case REFERENCE_TYPE:
+      q_no = typevec[TYPE_SYMTAB_ADDRESS (t)].q_type_number;
+      if (q_no && q_typevec[q_no].reference_type)
+	return q_typevec[q_no].reference_type;
+      break;
+    default:
+      break;
+    }
+  return 0;
+}
+/* APPLE LOCAL end dbxout_type rewrite.  */
 /* Output the index of a type.  */
 
 static void
 dbxout_type_index (tree type)
 {
+  /* APPLE LOCAL begin dbxout_type rewrite.  */
+  struct typeinfo *t = NULL;
+
+  if (TYPE_SYMTAB_ADDRESS (type) == 0)
+  {
+    int r = dbxout_reusable_type (type);
+    if (r)
+	TYPE_SYMTAB_ADDRESS (type) = r;
+    dbxout_next_type_number (type);
+  }
 #ifndef DBX_USE_BINCL
-  fprintf (asm_out_file, "%d", TYPE_SYMTAB_ADDRESS (type));
-  CHARS (3);
+  stabstr_D (TYPE_SYMTAB_ADDRESS (type));
 #else
-  struct typeinfo *t = &typevec[TYPE_SYMTAB_ADDRESS (type)];
-  fprintf (asm_out_file, "(%d,%d)", t->file_number, t->type_number);
-  CHARS (9);
+
+  t = &typevec[TYPE_SYMTAB_ADDRESS (type)];
+  /* APPLE LOCAL end dbxout_type rewrite.  */
+  stabstr_C ('(');
+  stabstr_D (t->file_number);
+  stabstr_C (',');
+  stabstr_D (t->type_number);
+  stabstr_C (')');
 #endif
 }
 
-#if DBX_CONTIN_LENGTH > 0
-/* Continue a symbol-description that gets too big.
-   End one symbol table entry with a double-backslash
-   and start a new one, eventually producing something like
-   .stabs "start......\\",code,0,value
-   .stabs "...rest",code,0,value   */
-
-static void
-dbxout_continue (void)
-{
-  emit_pending_bincls_if_required ();
-#ifdef DBX_CONTIN_CHAR
-  fprintf (asm_out_file, "%c", DBX_CONTIN_CHAR);
-#else
-  fprintf (asm_out_file, "\\\\");
-#endif
-  dbxout_finish_symbol (NULL_TREE);
-  fprintf (asm_out_file, "%s\"", ASM_STABS_OP);
-  current_sym_nchars = 0;
-}
-#endif /* DBX_CONTIN_LENGTH > 0 */
 
+
+/* Used in several places: evaluates to '0' for a private decl,
+   '1' for a protected decl, '2' for a public decl.  */
+#define DECL_ACCESSIBILITY_CHAR(DECL) \
+(TREE_PRIVATE (DECL) ? '0' : TREE_PROTECTED (DECL) ? '1' : '2')
+
 /* Subroutine of `dbxout_type'.  Output the type fields of TYPE.
    This must be a separate function because anonymous unions require
    recursive calls.  */
@@ -975,14 +1711,14 @@ dbxout_type_fields (tree type)
 
       /* Omit here local type decls until we know how to support them.  */
       if (TREE_CODE (tem) == TYPE_DECL
+	  /* Omit here the nameless fields that are used to skip bits.  */
+	  || DECL_IGNORED_P (tem)
 	  /* Omit fields whose position or size are variable or too large to
 	     represent.  */
 	  || (TREE_CODE (tem) == FIELD_DECL
 	      && (! host_integerp (bit_position (tem), 0)
 		  || ! DECL_SIZE (tem)
-		  || ! host_integerp (DECL_SIZE (tem), 1)))
-	  /* Omit here the nameless fields that are used to skip bits.  */
-	   || DECL_IGNORED_P (tem))
+		  || ! host_integerp (DECL_SIZE (tem), 1))))
 	continue;
 
       else if (TREE_CODE (tem) != CONST_DECL)
@@ -991,28 +1727,37 @@ dbxout_type_fields (tree type)
 	     but not before the first field.  */
 	  if (tem != TYPE_FIELDS (type))
 	    CONTIN;
+	  /* APPLE LOCAL begin 4174833 */
+	  /* If we are outputting fields for an Objective-C class, we need
+	     to output all fields in superclasses as well; gdb does not
+	     currently grok Objective-C type hierarchies.  */
+	  else if (TREE_CODE (TREE_TYPE (tem)) == RECORD_TYPE
+		   && !strncmp (lang_hooks.name, "GNU Objective-C", 15))
+	    {
+	      /* NB: Non-C-based languages will need to provide a stub
+		 for objc_is_class_name().  */
+	      extern tree objc_is_class_name (tree);
+
+	      if (objc_is_class_name (TYPE_NAME (type))
+		  && objc_is_class_name (TYPE_NAME (TREE_TYPE (tem))))
+		{
+		  dbxout_type_fields (TREE_TYPE (tem));
+		  continue;
+		}
+	    }
+	  /* APPLE LOCAL end 4174833 */
 
 	  if (DECL_NAME (tem))
-	    {
-	      fprintf (asm_out_file, "%s:", IDENTIFIER_POINTER (DECL_NAME (tem)));
-	      CHARS (2 + IDENTIFIER_LENGTH (DECL_NAME (tem)));
-	    }
-	  else
-	    {
-	      fprintf (asm_out_file, ":");
-	      CHARS (1);
-	    }
+	    stabstr_I (DECL_NAME (tem));
+	  stabstr_C (':');
 
 	  if (use_gnu_debug_info_extensions
 	      && (TREE_PRIVATE (tem) || TREE_PROTECTED (tem)
 		  || TREE_CODE (tem) != FIELD_DECL))
 	    {
 	      have_used_extensions = 1;
-	      putc ('/', asm_out_file);
-	      putc ((TREE_PRIVATE (tem) ? '0'
-		     : TREE_PROTECTED (tem) ? '1' : '2'),
-		    asm_out_file);
-	      CHARS (2);
+	      stabstr_C ('/');
+	      stabstr_C (DECL_ACCESSIBILITY_CHAR (tem));
 	    }
 
 	  dbxout_type ((TREE_CODE (tem) == FIELD_DECL
@@ -1026,36 +1771,31 @@ dbxout_type_fields (tree type)
 		  tree name = DECL_ASSEMBLER_NAME (tem);
 
 		  have_used_extensions = 1;
-		  fprintf (asm_out_file, ":%s;", IDENTIFIER_POINTER (name));
-		  CHARS (IDENTIFIER_LENGTH (name) + 2);
+		  stabstr_C (':');
+		  stabstr_I (name);
+		  stabstr_C (';');
 		}
 	      else
-		{
-		  /* If TEM is non-static, GDB won't understand it.  */
-		  fprintf (asm_out_file, ",0,0;");
-		  CHARS (5);
-		}
+		/* If TEM is non-static, GDB won't understand it.  */
+		stabstr_S (",0,0;");
 	    }
 	  else
 	    {
-	      putc (',', asm_out_file);
-	      print_wide_int (int_bit_position (tem));
-	      putc (',', asm_out_file);
-	      print_wide_int (tree_low_cst (DECL_SIZE (tem), 1));
-	      putc (';', asm_out_file);
-	      CHARS (3);
+	      stabstr_C (',');
+	      stabstr_D (int_bit_position (tem));
+	      stabstr_C (',');
+	      stabstr_D (tree_low_cst (DECL_SIZE (tem), 1));
+	      stabstr_C (';');
 	    }
 	}
     }
 }
 
 /* Subroutine of `dbxout_type_methods'.  Output debug info about the
-   method described DECL.  DEBUG_NAME is an encoding of the method's
-   type signature.  ??? We may be able to do without DEBUG_NAME altogether
-   now.  */
+   method described DECL.  */
 
 static void
-dbxout_type_method_1 (tree decl, const char *debug_name)
+dbxout_type_method_1 (tree decl)
 {
   char c1 = 'A', c2;
 
@@ -1079,20 +1819,21 @@ dbxout_type_method_1 (tree decl, const char *debug_name)
 	c2 = '.';
     }
 
-  fprintf (asm_out_file, ":%s;%c%c%c", debug_name,
-	   TREE_PRIVATE (decl) ? '0'
-	   : TREE_PROTECTED (decl) ? '1' : '2', c1, c2);
-  CHARS (IDENTIFIER_LENGTH (DECL_ASSEMBLER_NAME (decl)) + 6
-	 - (debug_name - IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (decl))));
+  /* ??? Output the mangled name, which contains an encoding of the
+     method's type signature.  May not be necessary anymore.  */
+  stabstr_C (':');
+  stabstr_I (DECL_ASSEMBLER_NAME (decl));
+  stabstr_C (';');
+  stabstr_C (DECL_ACCESSIBILITY_CHAR (decl));
+  stabstr_C (c1);
+  stabstr_C (c2);
 
   if (DECL_VINDEX (decl) && host_integerp (DECL_VINDEX (decl), 0))
     {
-      print_wide_int (tree_low_cst (DECL_VINDEX (decl), 0));
-      putc (';', asm_out_file);
-      CHARS (1);
+      stabstr_D (tree_low_cst (DECL_VINDEX (decl), 0));
+      stabstr_C (';');
       dbxout_type (DECL_CONTEXT (decl), 0);
-      fprintf (asm_out_file, ";");
-      CHARS (1);
+      stabstr_C (';');
     }
 }
 
@@ -1104,20 +1845,11 @@ dbxout_type_methods (tree type)
 {
   /* C++: put out the method names and their parameter lists */
   tree methods = TYPE_METHODS (type);
-  tree type_encoding;
   tree fndecl;
   tree last;
-  char formatted_type_identifier_length[16];
-  int type_identifier_length;
 
   if (methods == NULL_TREE)
     return;
-
-  type_encoding = DECL_NAME (TYPE_NAME (type));
-
-  type_identifier_length = IDENTIFIER_LENGTH (type_encoding);
-
-  sprintf (formatted_type_identifier_length, "%d", type_identifier_length);
 
   if (TREE_CODE (methods) != TREE_VEC)
     fndecl = methods;
@@ -1139,17 +1871,11 @@ dbxout_type_methods (tree type)
 	   well as the name of the field before overloading, along
 	   with its parameter list */
 	{
-	  /* This is the "mangled" name of the method.
-	     It encodes the argument types.  */
-	  const char *debug_name;
-
 	  /* Skip methods that aren't FUNCTION_DECLs.  (In C++, these
 	     include TEMPLATE_DECLs.)  The debugger doesn't know what
 	     to do with such entities anyhow.  */
 	  if (TREE_CODE (fndecl) != FUNCTION_DECL)
 	    continue;
-
-	  debug_name = IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (fndecl));
 
 	  CONTIN;
 
@@ -1164,21 +1890,16 @@ dbxout_type_methods (tree type)
 	     expects.  */
 	  if (need_prefix)
 	    {
-	      tree name = DECL_NAME (fndecl);
-	      fprintf (asm_out_file, "%s::", IDENTIFIER_POINTER (name));
-	      CHARS (IDENTIFIER_LENGTH (name) + 2);
+	      stabstr_I (DECL_NAME (fndecl));
+	      stabstr_S ("::");
 	      need_prefix = 0;
 	    }
 
 	  dbxout_type (TREE_TYPE (fndecl), 0);
-
-	  dbxout_type_method_1 (fndecl, debug_name);
+	  dbxout_type_method_1 (fndecl);
 	}
       if (!need_prefix)
-	{
-	  putc (';', asm_out_file);
-	  CHARS (1);
-	}
+	stabstr_C (';');
     }
 }
 
@@ -1189,7 +1910,7 @@ dbxout_type_methods (tree type)
 static void
 dbxout_range_type (tree type)
 {
-  fprintf (asm_out_file, "r");
+  stabstr_C ('r');
   if (TREE_TYPE (type))
     dbxout_type (TREE_TYPE (type), 0);
   else if (TREE_CODE (type) != INTEGER_TYPE)
@@ -1214,129 +1935,282 @@ dbxout_range_type (tree type)
 	dbxout_type_index (integer_type_node);
     }
 
+  stabstr_C (';');
   if (TYPE_MIN_VALUE (type) != 0
       && host_integerp (TYPE_MIN_VALUE (type), 0))
     {
-      putc (';', asm_out_file);
-      CHARS (1);
       if (print_int_cst_bounds_in_octal_p (type))
-        print_int_cst_octal (TYPE_MIN_VALUE (type));
+        stabstr_O (TYPE_MIN_VALUE (type));
       else
-        print_wide_int (tree_low_cst (TYPE_MIN_VALUE (type), 0));
+        stabstr_D (tree_low_cst (TYPE_MIN_VALUE (type), 0));
     }
   else
-    {
-      fprintf (asm_out_file, ";0");
-      CHARS (2);
-    }
+    stabstr_C ('0');
 
+  stabstr_C (';');
   if (TYPE_MAX_VALUE (type) != 0
       && host_integerp (TYPE_MAX_VALUE (type), 0))
     {
-      putc (';', asm_out_file);
-      CHARS (1);
       if (print_int_cst_bounds_in_octal_p (type))
-        print_int_cst_octal (TYPE_MAX_VALUE (type));
+        stabstr_O (TYPE_MAX_VALUE (type));
       else
-        print_wide_int (tree_low_cst (TYPE_MAX_VALUE (type), 0));
-      putc (';', asm_out_file);
-      CHARS (1);
+        stabstr_D (tree_low_cst (TYPE_MAX_VALUE (type), 0));
+      stabstr_C (';');
     }
   else
-    {
-      fprintf (asm_out_file, ";-1;");
-      CHARS (4);
-    }
+    stabstr_S ("-1;");
 }
 
 
-/* Output a reference to a type.  If the type has not yet been
-   described in the dbx output, output its definition now.
-   For a type already defined, just refer to its definition
-   using the type number.
+/* APPLE LOCAL begin dbxout_type rewrite.  */
+/* Output a reference to a type.
 
-   If FULL is nonzero, and the type has been described only with
-   a forward-reference, output the definition now.
-   If FULL is zero in this case, just refer to the forward-reference
-   using the number previously allocated.  */
+   If FLAG is zero then do not try to describe entire type definition.
+   Instead, queue the type for full type description.
 
-static void
-dbxout_type (tree type, int full)
+   If FLAG is nonzero then describe entire type.  
+
+   Return TRUE if partial type description along with cross reference
+   is emitted. Return FALSE otherwise.  */
+
+static bool
+dbxout_type (tree type, int flag)
 {
-  tree tem;
   tree main_variant;
-  static int anonymous_type_number = 0;
 
-  if (TREE_CODE (type) == VECTOR_TYPE)
-    /* The frontend feeds us a representation for the vector as a struct
-       containing an array.  Pull out the array type.  */
-    type = TREE_TYPE (TYPE_FIELDS (TYPE_DEBUG_REPRESENTATION_TYPE (type)));
+  /* If there was an input error and we don't really have a type, avoid
+     crashing and write something that is at least valid by
+     assuming `int'.  */
+  if (type == error_mark_node) 
+    type = integer_type_node; 
 
-  /* If there was an input error and we don't really have a type,
-     avoid crashing and write something that is at least valid
-     by assuming `int'.  */
-  if (type == error_mark_node)
-    type = integer_type_node;
+  /* Try to find the "main variant" of this type with the same name.  */
+  if (TYPE_NAME (type) && TREE_CODE (TYPE_NAME (type)) == TYPE_DECL 
+      && DECL_ORIGINAL_TYPE (TYPE_NAME (type))) 
+    main_variant = TREE_TYPE (TYPE_NAME (type)); 
+  else 
+    main_variant = TYPE_MAIN_VARIANT (type); 
+ 
+  /* If we are not using extensions, stabs does not distinguish const and 
+     volatile, so there is no need to make them separate types.  */ 
+  if (!use_gnu_debug_info_extensions) 
+    type = main_variant; 
+   
+  /* If TYPE_DECL_SUPPRESS_DEBUG is set then emit partial type only.  */
+  if (TYPE_NAME (type)
+      && TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
+      && TYPE_DECL_SUPPRESS_DEBUG (TYPE_NAME (type))
+      && flag == 1)
+    flag = 0;
+
+  if (flag == 1  || flag == 2)
+    dbxout_complete_type (type, main_variant);
+  else if ( flag == 0)
+    return dbxout_partial_type (type, main_variant);
   else
-    {
-      if (TYPE_NAME (type)
-	  && TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
-	  && TYPE_DECL_SUPPRESS_DEBUG (TYPE_NAME (type)))
-	full = 0;
-    }
+    gcc_unreachable ();
+  return false;
+}
 
-  /* Try to find the "main variant" with the same name.  */
-  if (TYPE_NAME (type) && TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
-      && DECL_ORIGINAL_TYPE (TYPE_NAME (type)))
-    main_variant = TREE_TYPE (TYPE_NAME (type));
-  else
-    main_variant = TYPE_MAIN_VARIANT (type);
+/* Emit partial type description. Queue actual type to describe it
+   entirely in new separate stab.  Return true if type is cross referenced.  */
 
-  /* If we are not using extensions, stabs does not distinguish const and
-     volatile, so there is no need to make them separate types.  */
-  if (!use_gnu_debug_info_extensions)
-    type = main_variant;
+static bool
+dbxout_partial_type (tree type, tree main_variant)
+{
+  bool result = false;
+  dbxout_type_index (type);
 
-  if (TYPE_SYMTAB_ADDRESS (type) == 0)
-    {
-      /* Type has no dbx number assigned.  Assign next available number.  */
-      TYPE_SYMTAB_ADDRESS (type) = next_type_number++;
-
-      /* Make sure type vector is long enough to record about this type.  */
-
-      if (next_type_number == typevec_len)
-	{
-	  typevec
-	    = ggc_realloc (typevec, (typevec_len * 2 * sizeof typevec[0]));
-	  memset (typevec + typevec_len, 0, typevec_len * sizeof typevec[0]);
-	  typevec_len *= 2;
-	}
-
-#ifdef DBX_USE_BINCL
-      emit_pending_bincls_if_required ();
-      typevec[TYPE_SYMTAB_ADDRESS (type)].file_number
-	= current_file->file_number;
-      typevec[TYPE_SYMTAB_ADDRESS (type)].type_number
-	= current_file->next_type_number++;
+#ifdef DBX_TYPE_DEFINED
+  if (DBX_TYPE_DEFINED (type))
+    return result;
 #endif
+
+  switch (typevec[TYPE_SYMTAB_ADDRESS (type)].status)
+    {
+    case TYPE_UNSEEN:
+      break;
+    case TYPE_XREF:
+    case TYPE_DEFINED:
+    case TYPE_QUEUED:
+	return result;
+      break;
     }
 
-  if (flag_debug_only_used_symbols)
+#ifdef DBX_NO_XREFS
+  /* For systems where dbx output does not allow the `=xsNAME:' syntax,
+     leave the type-number completely undefined rather than output
+     a cross-reference.  If we have already used GNU debug info extensions,
+     then it is OK to output a cross reference.  This is necessary to get
+     proper C++ debug output.  */
+  if ((TREE_CODE (type) == RECORD_TYPE || TREE_CODE (type) == UNION_TYPE
+       || TREE_CODE (type) == QUAL_UNION_TYPE
+       || TREE_CODE (type) == ENUMERAL_TYPE)
+      && ! use_gnu_debug_info_extensions)
+    /* We must use the same test here as we use twice below when deciding
+       whether to emit a cross-reference.  */
+    if (dbxout_cross_ref_type_p (type))
+      {
+	typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_XREF;
+	result = true;
+	return result;
+      }
+#endif
+
+  /* Handle const qualified types.  */
+  if (TYPE_READONLY (type) > TYPE_READONLY (main_variant))
     {
-      if ((TREE_CODE (type) == RECORD_TYPE
-	   || TREE_CODE (type) == UNION_TYPE
-	   || TREE_CODE (type) == QUAL_UNION_TYPE
-	   || TREE_CODE (type) == ENUMERAL_TYPE)
-	  && TYPE_STUB_DECL (type)
+      dbxout_queue_type (type);
+      return result;
+    }
+
+  /* Handle volatile qualified types.  */
+  if (TYPE_VOLATILE (type) > TYPE_VOLATILE (main_variant))
+    {
+      dbxout_queue_type (type);
+      return result;
+    }
+
+  if (flag_debug_only_used_symbols
+      && TYPE_NAME (type)
+      && TREE_CODE (TYPE_NAME (type)) == TYPE_DECL)
+    {
+      tree tree_type = TREE_TYPE (TYPE_NAME (type));
+      tree orig_type = DECL_ORIGINAL_TYPE (TYPE_NAME (type));
+      if (tree_type)
+      {
+	switch (TREE_CODE (tree_type))
+	  {
+	  case ENUMERAL_TYPE:
+	  case RECORD_TYPE:
+	  case UNION_TYPE:
+	  case QUAL_UNION_TYPE:
+	    dbxout_next_type_number (tree_type);
+	    typevec[TYPE_SYMTAB_ADDRESS (tree_type)].status = TYPE_XREF;
+	    dbxout_type_xref (tree_type);
+	    result = true;
+	    if (orig_type
+		&& TYPE_STUB_DECL (orig_type)
+		&& ! DECL_IGNORED_P (TYPE_STUB_DECL (orig_type)))
+	      debug_queue_symbol (TYPE_STUB_DECL (orig_type));
+	    break;
+	  default:
+	    break;
+	  }
+      }
+      if (orig_type)
+	dbxout_queue_type (orig_type);
+      dbxout_queue_type (type);
+      return result;
+    }
+
+  switch (TREE_CODE (type))
+    {
+    case VOID_TYPE:
+    case LANG_TYPE:
+      dbxout_void_type (type);
+      break;
+
+    case RECORD_TYPE:
+    case UNION_TYPE:
+    case QUAL_UNION_TYPE:
+    case ENUMERAL_TYPE:
+
+      /* Put the TYPE_DECL node pointed by TYPE_STUB_DECL into queue.  */
+      if (TYPE_STUB_DECL (type)
 	  && DECL_P (TYPE_STUB_DECL (type))
 	  && ! DECL_IGNORED_P (TYPE_STUB_DECL (type)))
 	debug_queue_symbol (TYPE_STUB_DECL (type));
-      else if (TYPE_NAME (type)
-	       && TREE_CODE (TYPE_NAME (type)) == TYPE_DECL)
-	debug_queue_symbol (TYPE_NAME (type));
+
+      /* Handle original type, if any.  */
+      if (main_variant != TYPE_MAIN_VARIANT (type))
+	{
+	  tree orig_type = DECL_ORIGINAL_TYPE (TYPE_NAME (type));
+	  if (flag_debug_only_used_symbols)
+	    {
+	      if (TYPE_STUB_DECL (orig_type)
+		  && !DECL_IGNORED_P (TYPE_STUB_DECL (orig_type)))
+		debug_queue_symbol (TYPE_STUB_DECL (orig_type));
+	    }
+	  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+	  dbxout_type_xref (orig_type);
+	  dbxout_queue_type (orig_type);
+	  return result; 
+	}
+
+      dbxout_queue_type (type);
+      break;
+
+    case INTEGER_TYPE:
+      dbxout_integer_type (type);
+      break;
+
+    case REAL_TYPE:
+      dbxout_real_type (type);
+      break;
+
+    case CHAR_TYPE:
+      dbxout_char_type (type);
+      break;
+
+    case BOOLEAN_TYPE:
+      dbxout_boolean_type (type);
+      break;
+
+    case COMPLEX_TYPE:
+      dbxout_complex_type (type);
+      break;
+
+    case VECTOR_TYPE:
+    case ARRAY_TYPE:
+    case OFFSET_TYPE:
+      dbxout_queue_type (type);
+      break;
+
+    case POINTER_TYPE:
+    case FILE_TYPE:
+    case REFERENCE_TYPE:
+    case FUNCTION_TYPE:
+      dbxout_note_q_type (type);
+      dbxout_queue_type (type);
+      break;
+
+    case METHOD_TYPE:
+      stabstr_C ('=');
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+      if (use_gnu_debug_info_extensions)
+	{
+	  have_used_extensions = 1;
+	  stabstr_C ('#');
+
+	  /* Write the argument types out longhand.  */
+	  dbxout_type (TYPE_METHOD_BASETYPE (type), 1);
+	  stabstr_C (',');
+	  dbxout_type (TREE_TYPE (type), 0);
+	  dbxout_args (TYPE_ARG_TYPES (type));
+	  stabstr_C (';');
+	}
+      else
+	/* Treat it as a function type.  */
+	dbxout_type (TREE_TYPE (type), 1);
+      break;
+
+
+    default:
+      gcc_unreachable ();
     }
 
-  /* Output the number of this type, to refer to it.  */
+  return result;
+}
+
+/* Describe complete type definition.  */
+
+static void
+dbxout_complete_type (tree type, tree main_variant)
+{
+  tree tem; 
+  bool vector_type = false;
+  
   dbxout_type_index (type);
 
 #ifdef DBX_TYPE_DEFINED
@@ -1344,19 +2218,17 @@ dbxout_type (tree type, int full)
     return;
 #endif
 
-  /* If this type's definition has been output or is now being output,
-     that is all.  */
-
   switch (typevec[TYPE_SYMTAB_ADDRESS (type)].status)
     {
     case TYPE_UNSEEN:
+    case TYPE_QUEUED:
       break;
     case TYPE_XREF:
       /* If we have already had a cross reference,
 	 and either that's all we want or that's the best we could do,
 	 don't repeat the cross reference.
 	 Sun dbx crashes if we do.  */
-      if (! full || !COMPLETE_TYPE_P (type)
+      if (!COMPLETE_TYPE_P (type)
 	  /* No way in DBX fmt to describe a variable size.  */
 	  || ! host_integerp (TYPE_SIZE (type), 1))
 	return;
@@ -1377,285 +2249,353 @@ dbxout_type (tree type, int full)
       && ! use_gnu_debug_info_extensions)
     /* We must use the same test here as we use twice below when deciding
        whether to emit a cross-reference.  */
-    if ((TYPE_NAME (type) != 0
-	 && ! (TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
-	       && DECL_IGNORED_P (TYPE_NAME (type)))
-	 && !full)
-	|| !COMPLETE_TYPE_P (type)
-	/* No way in DBX fmt to describe a variable size.  */
-	|| ! host_integerp (TYPE_SIZE (type), 1))
+    if (dbxout_cross_ref_type_p (type))
       {
 	typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_XREF;
 	return;
       }
 #endif
 
-  /* Output a definition now.  */
-
-  fprintf (asm_out_file, "=");
-  CHARS (1);
-
-  /* Mark it as defined, so that if it is self-referent
-     we will not get into an infinite recursion of definitions.  */
-
-  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
-
-  /* If this type is a variant of some other, hand off.  Types with
-     different names are usefully distinguished.  We only distinguish
-     cv-qualified types if we're using extensions.  */
+  /* Handle const qualified types.  */
   if (TYPE_READONLY (type) > TYPE_READONLY (main_variant))
     {
-      putc ('k', asm_out_file);
-      CHARS (1);
-      dbxout_type (build_type_variant (type, 0, TYPE_VOLATILE (type)), 0);
-      return;
-    }
-  else if (TYPE_VOLATILE (type) > TYPE_VOLATILE (main_variant))
-    {
-      putc ('B', asm_out_file);
-      CHARS (1);
-      dbxout_type (build_type_variant (type, TYPE_READONLY (type), 0), 0);
-      return;
-    }
-  else if (main_variant != TYPE_MAIN_VARIANT (type))
-    {
-      if (flag_debug_only_used_symbols)
-        {
-          tree orig_type = DECL_ORIGINAL_TYPE (TYPE_NAME (type));
+      tree ttype;
 
-          if ((TREE_CODE (orig_type) == RECORD_TYPE
-               || TREE_CODE (orig_type) == UNION_TYPE
-               || TREE_CODE (orig_type) == QUAL_UNION_TYPE
-               || TREE_CODE (orig_type) == ENUMERAL_TYPE)
-              && TYPE_STUB_DECL (orig_type)
-              && ! DECL_IGNORED_P (TYPE_STUB_DECL (orig_type)))
-            debug_queue_symbol (TYPE_STUB_DECL (orig_type));
-        }
-      /* 'type' is a typedef; output the type it refers to.  */
-      dbxout_type (DECL_ORIGINAL_TYPE (TYPE_NAME (type)), 0);
+      stabstr_C ('=');
+      stabstr_C ('k');
+      ttype = build_type_variant (type, 0, TYPE_VOLATILE (type)); /* ??? */
+
+      dbxout_next_type_number (ttype);      
+      dbxout_type_index (ttype);
+      dbxout_queue_type (ttype);
+
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
       return;
     }
-  /* else continue.  */
+
+  /* Handle volatile qualified types.  */
+  if (TYPE_VOLATILE (type) > TYPE_VOLATILE (main_variant))
+    {
+      tree ttype;
+
+      stabstr_C ('=');
+
+      /* In Objective-C, EH handling mechanism volatizes variables.
+	 It is implementation detail and no need to put that info
+	 into stabs. This is true for Objective-C++ also. strncmp 
+	 check validates both languages.  */
+      if (strncmp (lang_hooks.name, "GNU Objective-C", 15)
+	  || !lookup_attribute ("objc_volatilized", TYPE_ATTRIBUTES (type)))
+	stabstr_C ('B');
+      ttype = build_type_variant (type, 0, TYPE_READONLY (type)); /* ??? */
+
+      dbxout_next_type_number (ttype);      
+      dbxout_type_index (ttype);
+      dbxout_queue_type (ttype);
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+      return;
+    }
+
+  /* If there is another, original type available for this type then
+     just emit type index number and queue original type for now.  */
+  if (TYPE_NAME (type)
+      && TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
+      && DECL_ORIGINAL_TYPE (TYPE_NAME (type)))
+    {
+      tree orig_type = DECL_ORIGINAL_TYPE (TYPE_NAME (type));
+      stabstr_C ('=');
+
+      dbxout_type_index (orig_type);
+
+      dbxout_queue_type (orig_type);
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+      return;
+    }
 
   switch (TREE_CODE (type))
     {
     case VOID_TYPE:
     case LANG_TYPE:
-      /* For a void type, just define it as itself; i.e., "5=5".
-	 This makes us consider it defined
-	 without saying what it is.  The debugger will make it
-	 a void type when the reference is seen, and nothing will
-	 ever override that default.  */
-      dbxout_type_index (type);
+      dbxout_void_type (type);
+      break;
+
+    case POINTER_TYPE:
+      dbxout_pointer_type (type);
+      break;
+
+    case RECORD_TYPE:
+    case UNION_TYPE:
+    case QUAL_UNION_TYPE:
+      {
+      tree binfo = TYPE_BINFO (type);
+
+      /* If TYPE_STUB_DECL is set and not ignored than it consider it as a used
+	 symbol and put it in symbol queue.  */
+      if (TYPE_STUB_DECL (type)
+	  && DECL_P (TYPE_STUB_DECL (type))
+	  && ! DECL_IGNORED_P (TYPE_STUB_DECL (type))
+	  && flag_debug_only_used_symbols)
+	debug_queue_symbol (TYPE_STUB_DECL (type));
+
+      if (!COMPLETE_TYPE_P (type)
+	  /* No way in DBX fmt to describe a variable size.  */
+	  || ! host_integerp (TYPE_SIZE (type), 1))
+	{
+	  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_XREF;
+	  if (use_gnu_debug_info_extensions)
+	    dbxout_type_xref (type);
+	  
+	  return;
+	}
+      
+      stabstr_C ('=');
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+      
+      /* Identify record or union, and print its size.  */
+      stabstr_C ((TREE_CODE (type) == RECORD_TYPE) ? 's' : 'u');
+      stabstr_D (int_size_in_bytes (type));
+      
+      /* APPLE LOCAL begin 4174833 */
+      /* If we are outputting fields for an Objective-C class, we must
+	 not output any references to superclasses; gdb does not
+	 currently grok Objective-C type hierarchies.  */
+      if (TREE_CODE (type) == RECORD_TYPE
+	  && !strncmp (lang_hooks.name, "GNU Objective-C", 15))
+	{
+	  /* NB: Non-C-based languages will need to provide a stub
+	     for objc_is_class_name().  */
+	  extern tree objc_is_class_name (tree);
+	  
+	  if (objc_is_class_name (TYPE_NAME (type)))
+	    binfo = NULL_TREE;
+	}
+      
+      /* APPLE LOCAL end 4174833 */
+      if (binfo)
+	{
+	  int i;
+	  tree child;
+	  VEC (tree) *accesses = BINFO_BASE_ACCESSES (binfo);
+	  
+	  if (use_gnu_debug_info_extensions)
+	    {
+	      if (BINFO_N_BASE_BINFOS (binfo))
+		{
+		  have_used_extensions = 1;
+		  stabstr_C ('!');
+		  stabstr_U (BINFO_N_BASE_BINFOS (binfo));
+		  stabstr_C (',');
+		}
+	    }
+	  for (i = 0; BINFO_BASE_ITERATE (binfo, i, child); i++)
+	    {
+	      tree access = (accesses ? VEC_index (tree, accesses, i)
+			     : access_public_node);
+	      
+	      if (use_gnu_debug_info_extensions)
+		{
+		  have_used_extensions = 1;
+		  stabstr_C (BINFO_VIRTUAL_P (child) ? '1' : '0');
+		  stabstr_C (access == access_public_node ? '2' :
+			     access == access_protected_node
+			     ? '1' :'0');
+		  if (BINFO_VIRTUAL_P (child)
+		      /* APPLE LOCAL begin 4172150 */
+		      && (strcmp (lang_hooks.name, "GNU C++") == 0
+			  || strcmp (lang_hooks.name, "GNU Objective-C++") == 0))
+		    /* APPLE LOCAL end 4172150 */
+		    /* For a virtual base, print the (negative)
+		       offset within the vtable where we must look
+		       to find the necessary adjustment.  */
+		    stabstr_D
+		      (tree_low_cst (BINFO_VPTR_FIELD (child), 0)
+		       * BITS_PER_UNIT);
+		  else
+		    stabstr_D (tree_low_cst (BINFO_OFFSET (child), 0)
+			       * BITS_PER_UNIT);
+		  stabstr_C (',');
+		  if (!dbxout_type (BINFO_TYPE (child), 0))
+		    dbxout_type_xref (BINFO_TYPE (child));
+		  stabstr_C (';');
+		}
+	      else
+		{
+		  /* Print out the base class information with
+		     fields which have the same names at the types
+		     they hold.  */
+		  dbxout_type_name (BINFO_TYPE (child));
+		  stabstr_C (':');
+		  dbxout_type (BINFO_TYPE (child), 0);
+		  stabstr_C (',');
+		  stabstr_D (tree_low_cst (BINFO_OFFSET (child), 0)
+			     * BITS_PER_UNIT);
+		  stabstr_C (',');
+		  stabstr_D
+		    (tree_low_cst (TYPE_SIZE (BINFO_TYPE (child)), 0)
+		     * BITS_PER_UNIT);
+		  stabstr_C (';');
+		}
+	    }
+	}
+      
+      /* Write out the field declarations.  */
+      dbxout_type_fields (type);
+      if (use_gnu_debug_info_extensions && TYPE_METHODS (type) != NULL_TREE)
+	{
+	  have_used_extensions = 1;
+	  dbxout_type_methods (type);
+	}
+      
+      stabstr_C (';');
+      
+      if (use_gnu_debug_info_extensions && TREE_CODE (type) == RECORD_TYPE
+	  /* Avoid the ~ if we don't really need it--it confuses dbx.  */
+	  && TYPE_VFIELD (type))
+	{
+	  have_used_extensions = 1;
+	  
+	  /* We need to write out info about what field this class
+	     uses as its "main" vtable pointer field, because if this
+	     field is inherited from a base class, GDB cannot necessarily
+	     figure out which field it's using in time.  */
+	  stabstr_S ("~%");
+	  dbxout_type (DECL_FCONTEXT (TYPE_VFIELD (type)), 0);
+	  stabstr_C (';');
+	}
+      }
+       break;
+       
+    case ENUMERAL_TYPE:
+
+      /* If TYPE_STUB_DECL is set and not ignored than it consider it as a used
+	 symbol and put it in symbol queue.  */
+      if (TYPE_STUB_DECL (type)
+	  && DECL_P (TYPE_STUB_DECL (type))
+	  && ! DECL_IGNORED_P (TYPE_STUB_DECL (type))
+	  && flag_debug_only_used_symbols)
+	debug_queue_symbol (TYPE_STUB_DECL (type));
+
+      if (!COMPLETE_TYPE_P (type)
+	  /* No way in DBX fmt to describe a variable size.  */
+	  || ! host_integerp (TYPE_SIZE (type), 1))
+	{
+	  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_XREF;
+	  if (use_gnu_debug_info_extensions)
+	    dbxout_type_xref (type);
+	  
+	  return;
+	}
+      
+
+      if (main_variant != TYPE_MAIN_VARIANT (type))
+	{
+	  tree orig_type = DECL_ORIGINAL_TYPE (TYPE_NAME (type));
+	  if (flag_debug_only_used_symbols)
+	    {
+
+	      if (TYPE_STUB_DECL (orig_type)
+		  && !DECL_IGNORED_P (TYPE_STUB_DECL (orig_type)))
+		debug_queue_symbol (TYPE_STUB_DECL (orig_type));
+	    }
+
+	  stabstr_C ('=');
+	  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+
+	  dbxout_type_index (orig_type);
+	  dbxout_queue_type (orig_type);
+	  return;
+	}
+
+      stabstr_C ('=');
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+
+      if (use_gnu_debug_info_extensions
+	  && TYPE_PRECISION (type) != TYPE_PRECISION (integer_type_node))
+	{
+	  have_used_extensions = 1;
+	  stabstr_S ("@s");
+	  stabstr_D (TYPE_PRECISION (type));
+	  stabstr_C (';');
+	}
+
+      stabstr_C ('e');
+      for (tem = TYPE_VALUES (type); tem; tem = TREE_CHAIN (tem))
+	{
+	  stabstr_I (TREE_PURPOSE (tem));
+	  stabstr_C (':');
+
+	  if (TREE_INT_CST_HIGH (TREE_VALUE (tem)) == 0)
+	    stabstr_D (TREE_INT_CST_LOW (TREE_VALUE (tem)));
+	  else if (TREE_INT_CST_HIGH (TREE_VALUE (tem)) == -1
+		   && (HOST_WIDE_INT) TREE_INT_CST_LOW (TREE_VALUE (tem)) < 0)
+	    stabstr_D (TREE_INT_CST_LOW (TREE_VALUE (tem)));
+	  else
+	    stabstr_O (TREE_VALUE (tem));
+
+	  stabstr_C (',');
+	  if (TREE_CHAIN (tem) != 0)
+	    CONTIN;
+	}
+
+      stabstr_C (';');
       break;
 
     case INTEGER_TYPE:
-      if (type == char_type_node && ! TYPE_UNSIGNED (type))
-	{
-	  /* Output the type `char' as a subrange of itself!
-	     I don't understand this definition, just copied it
-	     from the output of pcc.
-	     This used to use `r2' explicitly and we used to
-	     take care to make sure that `char' was type number 2.  */
-	  fprintf (asm_out_file, "r");
-	  CHARS (1);
-	  dbxout_type_index (type);
-	  fprintf (asm_out_file, ";0;127;");
-	  CHARS (7);
-	}
-
-      /* If this is a subtype of another integer type, always prefer to
-	 write it as a subtype.  */
-      else if (TREE_TYPE (type) != 0
-	       && TREE_CODE (TREE_TYPE (type)) == INTEGER_TYPE)
-	{
-	  /* If the size is non-standard, say what it is if we can use
-	     GDB extensions.  */
-
-	  if (use_gnu_debug_info_extensions
-	      && TYPE_PRECISION (type) != TYPE_PRECISION (integer_type_node))
-	    {
-	      have_used_extensions = 1;
-	      fprintf (asm_out_file, "@s%d;", TYPE_PRECISION (type));
-	      CHARS (5);
-	    }
-
-	  dbxout_range_type (type);
-	}
-
-      else
-	{
-	  /* If the size is non-standard, say what it is if we can use
-	     GDB extensions.  */
-
-	  if (use_gnu_debug_info_extensions
-	      && TYPE_PRECISION (type) != TYPE_PRECISION (integer_type_node))
-	    {
-	      have_used_extensions = 1;
-	      fprintf (asm_out_file, "@s%d;", TYPE_PRECISION (type));
-	      CHARS (5);
-	    }
-
-	  if (print_int_cst_bounds_in_octal_p (type))
-	    {
-	      fprintf (asm_out_file, "r");
-	      CHARS (1);
-
-              /* If this type derives from another type, output type index of
-		 parent type. This is particularly important when parent type
-		 is an enumerated type, because not generating the parent type
-		 index would transform the definition of this enumerated type
-		 into a plain unsigned type.  */
-              if (TREE_TYPE (type) != 0)
-                dbxout_type_index (TREE_TYPE (type));
-              else
-                dbxout_type_index (type);
-
-	      fprintf (asm_out_file, ";");
-	      CHARS (1);
-	      print_int_cst_octal (TYPE_MIN_VALUE (type));
-	      fprintf (asm_out_file, ";");
-	      CHARS (1);
-	      print_int_cst_octal (TYPE_MAX_VALUE (type));
-	      fprintf (asm_out_file, ";");
-	      CHARS (1);
-	    }
-
-	  else
-	    /* Output other integer types as subranges of `int'.  */
-	    dbxout_range_type (type);
-	}
-
+      dbxout_integer_type (type);
       break;
 
     case REAL_TYPE:
-      /* This used to say `r1' and we used to take care
-	 to make sure that `int' was type number 1.  */
-      fprintf (asm_out_file, "r");
-      CHARS (1);
-      dbxout_type_index (integer_type_node);
-      putc (';', asm_out_file);
-      CHARS (1);
-      print_wide_int (int_size_in_bytes (type));
-      fputs (";0;", asm_out_file);
-      CHARS (3);
+      dbxout_real_type (type);
       break;
 
     case CHAR_TYPE:
-      if (use_gnu_debug_info_extensions)
-	{
-	  have_used_extensions = 1;
-	  fputs ("@s", asm_out_file);
-	  CHARS (2);
-	  print_wide_int (BITS_PER_UNIT * int_size_in_bytes (type));
-	  fputs (";-20;", asm_out_file);
-	  CHARS (4);
-	}
-      else
-	{
-	  /* Output the type `char' as a subrange of itself.
-	     That is what pcc seems to do.  */
-	  fprintf (asm_out_file, "r");
-	  CHARS (1);
-	  dbxout_type_index (char_type_node);
-	  fprintf (asm_out_file, ";0;%d;", TYPE_UNSIGNED (type) ? 255 : 127);
-	  CHARS (7);
-	}
+      dbxout_char_type (type);
       break;
 
     case BOOLEAN_TYPE:
-      if (use_gnu_debug_info_extensions)
-	{
-	  have_used_extensions = 1;
-	  fputs ("@s", asm_out_file);
-	  CHARS (2);
-	  print_wide_int (BITS_PER_UNIT * int_size_in_bytes (type));
-	  fputs (";-16;", asm_out_file);
-	  CHARS (4);
-	}
-      else /* Define as enumeral type (False, True) */
-	{
-	  fprintf (asm_out_file, "eFalse:0,True:1,;");
-	  CHARS (17);
-	}
-      break;
-
-    case FILE_TYPE:
-      putc ('d', asm_out_file);
-      CHARS (1);
-      dbxout_type (TREE_TYPE (type), 0);
+      dbxout_boolean_type (type);
       break;
 
     case COMPLEX_TYPE:
-      /* Differs from the REAL_TYPE by its new data type number.
-	 R3 is NF_COMPLEX.  We don't try to use any of the other NF_*
-	 codes since gdb doesn't care anyway.  */
-
-      if (TREE_CODE (TREE_TYPE (type)) == REAL_TYPE)
-	{
-	  fputs ("R3;", asm_out_file);
-	  CHARS (3);
-	  print_wide_int (2 * int_size_in_bytes (TREE_TYPE (type)));
-	  fputs (";0;", asm_out_file);
-	  CHARS (3);
-	}
-      else
-	{
-	  /* Output a complex integer type as a structure,
-	     pending some other way to do it.  */
-	  putc ('s', asm_out_file);
-	  CHARS (1);
-	  print_wide_int (int_size_in_bytes (type));
-	  fprintf (asm_out_file, "real:");
-	  CHARS (5);
-
-	  dbxout_type (TREE_TYPE (type), 0);
-	  fprintf (asm_out_file, ",0,%d;", TYPE_PRECISION (TREE_TYPE (type)));
-	  CHARS (7);
-	  fprintf (asm_out_file, "imag:");
-	  CHARS (5);
-	  dbxout_type (TREE_TYPE (type), 0);
-	  fprintf (asm_out_file, ",%d,%d;;", TYPE_PRECISION (TREE_TYPE (type)),
-		   TYPE_PRECISION (TREE_TYPE (type)));
-	  CHARS (10);
-	}
+      dbxout_complex_type (type);
       break;
 
-    case SET_TYPE:
-      if (use_gnu_debug_info_extensions)
-	{
-	  have_used_extensions = 1;
-	  fputs ("@s", asm_out_file);
-	  CHARS (2);
-	  print_wide_int (BITS_PER_UNIT * int_size_in_bytes (type));
-	  putc (';', asm_out_file);
-	  CHARS (1);
-
-	  /* Check if a bitstring type, which in Chill is
-	     different from a [power]set.  */
-	  if (TYPE_STRING_FLAG (type))
-	    {
-	      fprintf (asm_out_file, "@S;");
-	      CHARS (3);
-	    }
-	}
-      putc ('S', asm_out_file);
-      CHARS (1);
-      dbxout_type (TYPE_DOMAIN (type), 0);
+    case FILE_TYPE:
+      dbxout_file_type (type);
       break;
 
+    case FUNCTION_TYPE:
+      dbxout_function_type (type);
+      break;
+
+    case REFERENCE_TYPE:
+      dbxout_reference_type (type);
+      break;
+
+    case VECTOR_TYPE:
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+      /* The frontend feeds us a representation for the vector as a struct
+	 containing an array.  Pull out the array type.  */
+      type = TREE_TYPE (TYPE_FIELDS (TYPE_DEBUG_REPRESENTATION_TYPE (type)));
+      vector_type = true;
+      /* Fall through  .. */
     case ARRAY_TYPE:
-      /* Make arrays of packed bits look like bitstrings for chill.  */
+
+      stabstr_C ('=');      
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
       if (TYPE_PACKED (type) && use_gnu_debug_info_extensions)
 	{
 	  have_used_extensions = 1;
-	  fputs ("@s", asm_out_file);
-	  CHARS (2);
-	  print_wide_int (BITS_PER_UNIT * int_size_in_bytes (type));
-	  fprintf (asm_out_file, ";@S;S");
-	  CHARS (5);
+	  stabstr_S ("@s");
+	  stabstr_D (BITS_PER_UNIT * int_size_in_bytes (type));
+	  stabstr_S (";@S;S");
 	  dbxout_type (TYPE_DOMAIN (type), 0);
-	  break;
+	}
+
+      if (vector_type)
+	{
+	  have_used_extensions = 1;
+	  stabstr_S ("@V;");
 	}
 
       /* Output "a" followed by a range type definition
@@ -1667,264 +2607,55 @@ dbxout_type (tree type, int full)
       if (TYPE_STRING_FLAG (type) && use_gnu_debug_info_extensions)
 	{
 	  have_used_extensions = 1;
-	  fprintf (asm_out_file, "@S;");
-	  CHARS (3);
+	  stabstr_S ("@S;");
 	}
       tem = TYPE_DOMAIN (type);
       if (tem == NULL)
 	{
-	  fprintf (asm_out_file, "ar");
-	  CHARS (2);
+	  stabstr_S ("ar");
 	  dbxout_type_index (integer_type_node);
-	  fprintf (asm_out_file, ";0;-1;");
-	  CHARS (6);
+	  stabstr_S (";0;-1;");
 	}
       else
 	{
-	  fprintf (asm_out_file, "a");
-	  CHARS (1);
+	  stabstr_C ('a');
 	  dbxout_range_type (tem);
 	}
 
-      dbxout_type (TREE_TYPE (type), 0);
-      break;
-
-    case RECORD_TYPE:
-    case UNION_TYPE:
-    case QUAL_UNION_TYPE:
-      {
-	tree binfo = TYPE_BINFO (type);
-
-	/* Output a structure type.  We must use the same test here as we
-	   use in the DBX_NO_XREFS case above.  */
-	if ((TYPE_NAME (type) != 0
-	     && ! (TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
-		   && DECL_IGNORED_P (TYPE_NAME (type)))
-	     && !full)
-	    || !COMPLETE_TYPE_P (type)
-	    /* No way in DBX fmt to describe a variable size.  */
-	    || ! host_integerp (TYPE_SIZE (type), 1))
-	  {
-	    /* If the type is just a cross reference, output one
-	       and mark the type as partially described.
-	       If it later becomes defined, we will output
-	       its real definition.
-	       If the type has a name, don't nest its definition within
-	       another type's definition; instead, output an xref
-	       and let the definition come when the name is defined.  */
-	    fputs ((TREE_CODE (type) == RECORD_TYPE) ? "xs" : "xu", asm_out_file);
-	    CHARS (2);
-	    if (TYPE_NAME (type) != 0)
-	      dbxout_type_name (type);
-	    else
-	      {
-		fprintf (asm_out_file, "$$%d", anonymous_type_number++);
-		CHARS (5);
-	      }
-
-	    fprintf (asm_out_file, ":");
-	    CHARS (1);
-	    typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_XREF;
-	    break;
-	  }
-
-	/* Identify record or union, and print its size.  */
-	putc (((TREE_CODE (type) == RECORD_TYPE) ? 's' : 'u'), asm_out_file);
-	CHARS (1);
-	print_wide_int (int_size_in_bytes (type));
-
-	if (binfo)
-	  {
-	    int i;
-	    tree child;
-	    VEC (tree) *accesses = BINFO_BASE_ACCESSES (binfo);
-	    
-	    if (use_gnu_debug_info_extensions)
-	      {
-		if (BINFO_N_BASE_BINFOS (binfo))
-		  {
-		    have_used_extensions = 1;
-		    fprintf (asm_out_file, "!%u,", BINFO_N_BASE_BINFOS (binfo));
-		    CHARS (8);
-		  }
-	      }
-	    for (i = 0; BINFO_BASE_ITERATE (binfo, i, child); i++)
-	      {
-		tree access = (accesses ? VEC_index (tree, accesses, i)
-			       : access_public_node);
-
-		if (use_gnu_debug_info_extensions)
-		  {
-		    have_used_extensions = 1;
-		    putc (BINFO_VIRTUAL_P (child) ? '1' : '0', asm_out_file);
-		    putc (access == access_public_node ? '2' :
-			  (access == access_protected_node ? '1' :'0'),
-			  asm_out_file);
-		    CHARS (2);
-		    if (BINFO_VIRTUAL_P (child)
-			&& strcmp (lang_hooks.name, "GNU C++") == 0)
-		      /* For a virtual base, print the (negative)
-		     	 offset within the vtable where we must look
-		     	 to find the necessary adjustment.  */
-		      print_wide_int
-			(tree_low_cst (BINFO_VPTR_FIELD (child), 0)
-			 * BITS_PER_UNIT);
-		    else
-		      print_wide_int (tree_low_cst (BINFO_OFFSET (child), 0)
-				      * BITS_PER_UNIT);
-		    putc (',', asm_out_file);
-		    CHARS (1);
-		    dbxout_type (BINFO_TYPE (child), 0);
-		    putc (';', asm_out_file);
-		    CHARS (1);
-		  }
-		else
-		  {
-		    /* Print out the base class information with
-		       fields which have the same names at the types
-		       they hold.  */
-		    dbxout_type_name (BINFO_TYPE (child));
-		    putc (':', asm_out_file);
-		    CHARS (1);
-		    dbxout_type (BINFO_TYPE (child), full);
-		    putc (',', asm_out_file);
-		    CHARS (1);
-		    print_wide_int (tree_low_cst (BINFO_OFFSET (child), 0)
-				    * BITS_PER_UNIT);
-		    putc (',', asm_out_file);
-		    CHARS (1);
-		    print_wide_int
-		      (tree_low_cst (TYPE_SIZE (BINFO_TYPE (child)), 0)
-		       * BITS_PER_UNIT);
-		    putc (';', asm_out_file);
-		    CHARS (1);
-		  }
-	      }
-	  }
-      }
-
-      /* Write out the field declarations.  */
-      dbxout_type_fields (type);
-      if (use_gnu_debug_info_extensions && TYPE_METHODS (type) != NULL_TREE)
-	{
-	  have_used_extensions = 1;
-	  dbxout_type_methods (type);
-	}
-
-      putc (';', asm_out_file);
-      CHARS (1);
-
-      if (use_gnu_debug_info_extensions && TREE_CODE (type) == RECORD_TYPE
-	  /* Avoid the ~ if we don't really need it--it confuses dbx.  */
-	  && TYPE_VFIELD (type))
-	{
-	  have_used_extensions = 1;
-
-	  /* Tell GDB+ that it may keep reading.  */
-	  putc ('~', asm_out_file);
-	  CHARS (1);
-
-	  /* We need to write out info about what field this class
-	     uses as its "main" vtable pointer field, because if this
-	     field is inherited from a base class, GDB cannot necessarily
-	     figure out which field it's using in time.  */
-	  if (TYPE_VFIELD (type))
-	    {
-	      putc ('%', asm_out_file);
-	      CHARS (1);
-	      dbxout_type (DECL_FCONTEXT (TYPE_VFIELD (type)), 0);
-	    }
-
-	  putc (';', asm_out_file);
-	  CHARS (1);
-	}
-      break;
-
-    case ENUMERAL_TYPE:
-      /* We must use the same test here as we use in the DBX_NO_XREFS case
-	 above.  We simplify it a bit since an enum will never have a variable
-	 size.  */
-      if ((TYPE_NAME (type) != 0
-	   && ! (TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
-		 && DECL_IGNORED_P (TYPE_NAME (type)))
-	   && !full)
-	  || !COMPLETE_TYPE_P (type))
-	{
-	  fprintf (asm_out_file, "xe");
-	  CHARS (2);
-	  dbxout_type_name (type);
-	  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_XREF;
-	  putc (':', asm_out_file);
-	  CHARS (1);
-	  return;
-	}
-      if (use_gnu_debug_info_extensions
-	  && TYPE_PRECISION (type) != TYPE_PRECISION (integer_type_node))
-	{
-	  fprintf (asm_out_file, "@s%d;", TYPE_PRECISION (type));
-	  CHARS (5);
-	}
-
-      putc ('e', asm_out_file);
-      CHARS (1);
-      for (tem = TYPE_VALUES (type); tem; tem = TREE_CHAIN (tem))
-	{
-	  fprintf (asm_out_file, "%s:", IDENTIFIER_POINTER (TREE_PURPOSE (tem)));
-	  CHARS (IDENTIFIER_LENGTH (TREE_PURPOSE (tem)) + 1);
-	  if (TREE_INT_CST_HIGH (TREE_VALUE (tem)) == 0)
-	    print_wide_int (TREE_INT_CST_LOW (TREE_VALUE (tem)));
-	  else if (TREE_INT_CST_HIGH (TREE_VALUE (tem)) == -1
-		   && (HOST_WIDE_INT) TREE_INT_CST_LOW (TREE_VALUE (tem)) < 0)
-	    print_wide_int (TREE_INT_CST_LOW (TREE_VALUE (tem)));
-	  else
-	    print_int_cst_octal (TREE_VALUE (tem));
-
-	  putc (',', asm_out_file);
-	  CHARS (1);
-	  if (TREE_CHAIN (tem) != 0)
-	    CONTIN;
-	}
-
-      putc (';', asm_out_file);
-      CHARS (1);
-      break;
-
-    case POINTER_TYPE:
-      putc ('*', asm_out_file);
-      CHARS (1);
-      dbxout_type (TREE_TYPE (type), 0);
+      dbxout_type_index (TREE_TYPE (type));
+	
+      dbxout_queue_type (TREE_TYPE (type));
       break;
 
     case METHOD_TYPE:
+      stabstr_C ('=');
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
       if (use_gnu_debug_info_extensions)
 	{
 	  have_used_extensions = 1;
-	  putc ('#', asm_out_file);
-	  CHARS (1);
+	  stabstr_C ('#');
 
 	  /* Write the argument types out longhand.  */
-	  dbxout_type (TYPE_METHOD_BASETYPE (type), 0);
-	  putc (',', asm_out_file);
-	  CHARS (1);
-	  dbxout_type (TREE_TYPE (type), 0);
+	  dbxout_type (TYPE_METHOD_BASETYPE (type), 1);
+	  stabstr_C (',');
+	  dbxout_type (TREE_TYPE (type), 1);
 	  dbxout_args (TYPE_ARG_TYPES (type));
-	  putc (';', asm_out_file);
-	  CHARS (1);
+	  stabstr_C (';');
 	}
       else
 	/* Treat it as a function type.  */
-	dbxout_type (TREE_TYPE (type), 0);
+	dbxout_type (TREE_TYPE (type), 1);
       break;
 
     case OFFSET_TYPE:
+      stabstr_C ('=');
+      typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
       if (use_gnu_debug_info_extensions)
 	{
 	  have_used_extensions = 1;
-	  putc ('@', asm_out_file);
-	  CHARS (1);
+	  stabstr_C ('@');
 	  dbxout_type (TYPE_OFFSET_BASETYPE (type), 0);
-	  putc (',', asm_out_file);
-	  CHARS (1);
+	  stabstr_C (',');
 	  dbxout_type (TREE_TYPE (type), 0);
 	}
       else
@@ -1932,24 +2663,368 @@ dbxout_type (tree type, int full)
 	dbxout_type (integer_type_node, 0);
       break;
 
-    case REFERENCE_TYPE:
-      if (use_gnu_debug_info_extensions)
-	have_used_extensions = 1;
-      putc (use_gnu_debug_info_extensions ? '&' : '*', asm_out_file);
-      CHARS (1);
-      dbxout_type (TREE_TYPE (type), 0);
-      break;
-
-    case FUNCTION_TYPE:
-      putc ('f', asm_out_file);
-      CHARS (1);
-      dbxout_type (TREE_TYPE (type), 0);
-      break;
-
     default:
       gcc_unreachable ();
     }
 }
+
+/* Output cross reference for TYPE.  */
+
+static void
+dbxout_type_xref (tree type)
+{
+  static int anonymous_type_number = 0;
+  stabstr_C ('=');
+  switch (TREE_CODE (type))
+    {
+    case RECORD_TYPE:
+      stabstr_S ("xs");
+      break;
+    case UNION_TYPE:
+    case QUAL_UNION_TYPE:
+      stabstr_S ("xu");
+      break;
+    case ENUMERAL_TYPE:
+      stabstr_S ("xe");
+      break;
+    default:
+      gcc_unreachable ();
+    }
+
+  if (TYPE_NAME (type) != 0)
+    dbxout_type_name (type);
+  else
+    {
+      stabstr_S ("$$");
+      stabstr_D (anonymous_type_number++);
+    }
+  stabstr_C (':');
+  return;
+}
+
+/* Describe TYPE as pointer type.  */
+
+static void
+dbxout_pointer_type (tree type)
+{
+  tree ttype;
+	
+  stabstr_C ('=');
+  stabstr_C ('*');
+  ttype = TREE_TYPE (type);
+  
+  dbxout_type_index (ttype);
+
+  dbxout_queue_type (ttype);
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+  return;
+}
+
+/* For a void type, just define it as itself; i.e., "5=5".
+   This makes us consider it defined
+   without saying what it is.  The debugger will make it
+   a void type when the reference is seen, and nothing will
+   ever override that default.  */
+
+static void
+dbxout_void_type (tree type)
+{
+  stabstr_C ('=');
+  dbxout_type_index (type);
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+}
+
+/* Describe TYPE as an integer type.  */
+
+static void
+dbxout_integer_type (tree type)
+{
+  stabstr_C ('=');
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+  if (type == char_type_node && ! TYPE_UNSIGNED (type))
+    {
+      /* Output the type `char' as a subrange of itself!
+	 I don't understand this definition, just copied it
+	 from the output of pcc.
+	 This used to use `r2' explicitly and we used to
+	 take care to make sure that `char' was type number 2.  */
+      stabstr_C ('r');
+      dbxout_type_index (type);
+      stabstr_S (";0;127;");
+    }
+  
+  /* If this is a subtype of another integer type, always prefer to
+     write it as a subtype.  */
+  else if (TREE_TYPE (type) != 0
+	   && TREE_CODE (TREE_TYPE (type)) == INTEGER_TYPE)
+    {
+      /* If the size is non-standard, say what it is if we can use
+	 GDB extensions.  */
+      
+      if (use_gnu_debug_info_extensions
+	  && TYPE_PRECISION (type) != TYPE_PRECISION (integer_type_node))
+	{
+	  have_used_extensions = 1;
+	  stabstr_S ("@s");
+	  stabstr_D (TYPE_PRECISION (type));
+	  stabstr_C (';');
+	}
+      
+      dbxout_range_type (type);
+    }
+  
+  else
+    {
+      /* If the size is non-standard, say what it is if we can use
+	 GDB extensions.  */
+      
+      if (use_gnu_debug_info_extensions
+	  && TYPE_PRECISION (type) != TYPE_PRECISION (integer_type_node))
+	{
+	  have_used_extensions = 1;
+	  stabstr_S ("@s");
+	  stabstr_D (TYPE_PRECISION (type));
+	  stabstr_C (';');
+	    }
+      
+	  if (print_int_cst_bounds_in_octal_p (type))
+	    {
+	      stabstr_C ('r');
+	      
+              /* If this type derives from another type, output type index of
+		 parent type. This is particularly important when parent type
+		 is an enumerated type, because not generating the parent type
+		 index would transform the definition of this enumerated type
+		 into a plain unsigned type.  */
+              if (TREE_TYPE (type) != 0)
+                dbxout_type_index (TREE_TYPE (type));
+              else
+                dbxout_type_index (type);
+	      
+	      stabstr_C (';');
+	      stabstr_O (TYPE_MIN_VALUE (type));
+	      stabstr_C (';');
+	      stabstr_O (TYPE_MAX_VALUE (type));
+	      stabstr_C (';');
+	    }
+	  
+	  else
+	    /* Output other integer types as subranges of `int'.  */
+	    dbxout_range_type (type);
+    }
+  return;
+}
+
+/* Describe TYPE as a real type.  */
+
+static void
+dbxout_real_type (tree type)
+{
+  stabstr_C ('=');
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+  /* This used to say `r1' and we used to take care
+     to make sure that `int' was type number 1.  */
+  stabstr_C ('r');
+  dbxout_type_index (integer_type_node);
+  stabstr_C (';');
+  stabstr_D (int_size_in_bytes (type));
+  stabstr_S (";0;");
+  return;
+}
+
+/* Describe type as a char type.  */
+
+static void
+dbxout_char_type (tree type)
+{
+  stabstr_C ('=');
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+  if (use_gnu_debug_info_extensions)
+    {
+      have_used_extensions = 1;
+      stabstr_S ("@s");
+      stabstr_D (BITS_PER_UNIT * int_size_in_bytes (type));
+      stabstr_S (";-20;");
+    }
+  else
+    {
+      /* Output the type `char' as a subrange of itself.
+	 That is what pcc seems to do.  */
+      stabstr_C ('r');
+      dbxout_type_index (char_type_node);
+      stabstr_S (TYPE_UNSIGNED (type) ? ";0;255;" : ";0;127;");
+    }
+  return;
+}
+
+/* Describe type as a boolean type.  */
+
+static void
+dbxout_boolean_type (tree type)
+{
+  stabstr_C ('=');
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+  if (use_gnu_debug_info_extensions)
+    {
+      have_used_extensions = 1;
+      stabstr_S ("@s");
+      stabstr_D (BITS_PER_UNIT * int_size_in_bytes (type));
+      stabstr_S (";-16;");
+    }
+  else /* Define as enumeral type (False, True) */
+    stabstr_S ("eFalse:0,True:1,;");
+  return;
+}
+
+/* Describe type as a complex type.  */
+
+static void
+dbxout_complex_type (tree type)
+{
+  stabstr_C ('=');
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+  /* Differs from the REAL_TYPE by its new data type number.
+     R3 is NF_COMPLEX.  We don't try to use any of the other NF_*
+     codes since gdb doesn't care anyway.  */
+  
+  if (TREE_CODE (TREE_TYPE (type)) == REAL_TYPE)
+    {
+      stabstr_S ("R3;");
+      stabstr_D (2 * int_size_in_bytes (TREE_TYPE (type)));
+      stabstr_S (";0;");
+    }
+  else
+    {
+      /* Output a complex integer type as a structure,
+	 pending some other way to do it.  */
+      stabstr_C ('s');
+      stabstr_D (int_size_in_bytes (type));
+      
+      stabstr_S ("real:");
+      dbxout_type (TREE_TYPE (type), 0);
+      stabstr_S (",0,");
+      stabstr_D (TYPE_PRECISION (TREE_TYPE (type)));
+      
+      stabstr_S (";imag:");
+      dbxout_type (TREE_TYPE (type), 0);
+      stabstr_C (',');
+      stabstr_D (TYPE_PRECISION (TREE_TYPE (type)));
+      stabstr_C (',');
+      stabstr_D (TYPE_PRECISION (TREE_TYPE (type)));
+      stabstr_S (";;");
+    }
+}
+
+/* Describe Type as a file type.  */
+
+static void
+dbxout_file_type (tree type)
+{
+  tree ttype;
+  
+  stabstr_C ('=');
+  stabstr_C ('d');
+  ttype = TREE_TYPE (type);
+  
+  dbxout_type_index (ttype);
+  
+  dbxout_queue_type (ttype);
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+
+  return;
+}
+
+/* Describe TYPE as a function type.  */
+
+static void
+dbxout_function_type (tree type)
+{
+  tree ttype;
+  
+  stabstr_C ('=');
+  stabstr_C ('f');
+  ttype = TREE_TYPE (type);
+  
+  dbxout_type_index (ttype);
+  
+  dbxout_queue_type (ttype);
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;
+
+  return;
+}
+
+/* Describe TYPE as a reference type.  */
+
+static void
+dbxout_reference_type (tree type)
+{
+  tree ttype;
+  
+  stabstr_C ('=');
+  if (use_gnu_debug_info_extensions)
+    {
+      have_used_extensions = 1;
+      stabstr_C ('&');
+    }
+  else
+    stabstr_C ('*');
+  
+  ttype = TREE_TYPE (type);
+  
+  dbxout_type_index (ttype);
+  
+  dbxout_queue_type (ttype);
+  /*  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_DEFINED;*/
+  return;
+}
+
+/*  Assigne next type number as the type number for TYPE.  */
+
+static void
+dbxout_next_type_number (tree type)
+{
+
+  if (TYPE_SYMTAB_ADDRESS (type) != 0)
+    return;
+
+  TYPE_SYMTAB_ADDRESS (type) = next_type_number++;
+
+  if (next_type_number == typevec_len)
+    {
+      typevec
+	= ggc_realloc (typevec, (typevec_len * 2 * sizeof typevec[0]));
+      memset (typevec + typevec_len, 0, typevec_len * sizeof typevec[0]);
+      typevec_len *= 2;
+    }
+  
+#ifdef DBX_USE_BINCL
+  emit_pending_bincls_if_required ();
+      typevec[TYPE_SYMTAB_ADDRESS (type)].file_number
+	= current_file->file_number;
+      typevec[TYPE_SYMTAB_ADDRESS (type)].type_number
+	= current_file->next_type_number++;
+#endif
+}
+
+/*  Return next qualified type num ber.  */
+
+static int
+dbxout_next_q_type_number (void)
+{
+
+  next_q_type_number++;
+
+  if (next_q_type_number == q_typevec_len)
+    {
+      q_typevec
+	= ggc_realloc (q_typevec, (q_typevec_len * 2 * sizeof q_typevec[0]));
+      memset (q_typevec + q_typevec_len, 0, q_typevec_len * sizeof q_typevec[0]);
+      q_typevec_len *= 2;
+    }
+  return next_q_type_number;
+}
+
+/* APPLE LOCAL end dbxout_type rewrite.  */
 
 /* Return nonzero if the given type represents an integer whose bounds
    should be printed in octal format.  */
@@ -1984,83 +3059,6 @@ print_int_cst_bounds_in_octal_p (tree type)
     return FALSE;
 }
 
-/* Print the value of integer constant C, in octal,
-   handling double precision.  */
-
-static void
-print_int_cst_octal (tree c)
-{
-  unsigned HOST_WIDE_INT high = TREE_INT_CST_HIGH (c);
-  unsigned HOST_WIDE_INT low = TREE_INT_CST_LOW (c);
-  int excess = (3 - (HOST_BITS_PER_WIDE_INT % 3));
-  unsigned int width = TYPE_PRECISION (TREE_TYPE (c));
-
-  /* GDB wants constants with no extra leading "1" bits, so
-     we need to remove any sign-extension that might be
-     present.  */
-  if (width == HOST_BITS_PER_WIDE_INT * 2)
-    ;
-  else if (width > HOST_BITS_PER_WIDE_INT)
-    high &= (((HOST_WIDE_INT) 1 << (width - HOST_BITS_PER_WIDE_INT)) - 1);
-  else if (width == HOST_BITS_PER_WIDE_INT)
-    high = 0;
-  else
-    high = 0, low &= (((HOST_WIDE_INT) 1 << width) - 1);
-
-  fprintf (asm_out_file, "0");
-  CHARS (1);
-
-  if (excess == 3)
-    {
-      print_octal (high, HOST_BITS_PER_WIDE_INT / 3);
-      print_octal (low, HOST_BITS_PER_WIDE_INT / 3);
-    }
-  else
-    {
-      unsigned HOST_WIDE_INT beg = high >> excess;
-      unsigned HOST_WIDE_INT middle
-	= ((high & (((HOST_WIDE_INT) 1 << excess) - 1)) << (3 - excess)
-	   | (low >> (HOST_BITS_PER_WIDE_INT / 3 * 3)));
-      unsigned HOST_WIDE_INT end
-	= low & (((unsigned HOST_WIDE_INT) 1
-		  << (HOST_BITS_PER_WIDE_INT / 3 * 3))
-		 - 1);
-
-      fprintf (asm_out_file, "%o%01o", (int) beg, (int) middle);
-      CHARS (2);
-      print_octal (end, HOST_BITS_PER_WIDE_INT / 3);
-    }
-}
-
-static void
-print_octal (unsigned HOST_WIDE_INT value, int digits)
-{
-  int i;
-
-  for (i = digits - 1; i >= 0; i--)
-    fprintf (asm_out_file, "%01o", (int) ((value >> (3 * i)) & 7));
-
-  CHARS (digits);
-}
-
-/* Output C in decimal while adjusting the number of digits written.  */
-
-static void
-print_wide_int (HOST_WIDE_INT c)
-{
-  int digs = 0;
-
-  fprintf (asm_out_file, HOST_WIDE_INT_PRINT_DEC, c);
-
-  if (c < 0)
-    digs++, c = -c;
-
-  while (c > 0)
-    c /= 10; digs++;
-
-  CHARS (digs);
-}
-
 /* Output the name of type TYPE, with no punctuation.
    Such names can be set up either by typedef declarations
    or by struct, enum and union tags.  */
@@ -2082,8 +3080,7 @@ dbxout_type_name (tree type)
       gcc_unreachable ();
     }
 
-  fprintf (asm_out_file, "%s", IDENTIFIER_POINTER (t));
-  CHARS (IDENTIFIER_LENGTH (t));
+  stabstr_I (t);
 }
 
 /* Output leading leading struct or class names needed for qualifying
@@ -2102,15 +3099,13 @@ dbxout_class_name_qualifiers (tree decl)
     {
       tree name = TYPE_NAME (context);
 
-      emit_pending_bincls_if_required ();
-
       if (TREE_CODE (name) == TYPE_DECL)
 	{
 	  dbxout_class_name_qualifiers (name);
 	  name = DECL_NAME (name);
 	}
-      fprintf (asm_out_file, "%s::", IDENTIFIER_POINTER (name));
-      CHARS (IDENTIFIER_LENGTH (name) + 2);
+      stabstr_I (name);
+      stabstr_S ("::");
     }
 }
 
@@ -2159,8 +3154,8 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
       /* We now have a used symbol.  We need to generate the info for
          the symbol's type in addition to the symbol itself.  These
          type symbols are queued to be generated after were done with
-         the symbol itself (done because the symbol's info is generated
-         with fprintf's, etc. as it determines what's needed).
+         the symbol itself (otherwise they would fight over the
+         stabstr obstack).
 
          Note, because the TREE_TYPE(type) might be something like a
          pointer to a named type we need to look for the first name
@@ -2203,14 +3198,6 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
 
   emit_pending_bincls_if_required ();
 
-  dbxout_prepare_symbol (decl);
-
-  /* The output will always start with the symbol name,
-     so always count that in the length-output-so-far.  */
-
-  if (DECL_NAME (decl) != 0)
-    current_sym_nchars = 2 + IDENTIFIER_LENGTH (DECL_NAME (decl));
-
   switch (TREE_CODE (decl))
     {
     case CONST_DECL:
@@ -2226,18 +3213,17 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
       context = decl_function_context (decl);
       if (context == current_function_decl)
 	break;
+      /* Don't mention an inline instance of a nested function.  */
+      if (context && DECL_FROM_INLINE (decl))
+	break;
       if (!MEM_P (DECL_RTL (decl))
 	  || GET_CODE (XEXP (DECL_RTL (decl), 0)) != SYMBOL_REF)
 	break;
-      FORCE_TEXT;
 
-      fprintf (asm_out_file, "%s\"%s:%c", ASM_STABS_OP,
-	       IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (decl)),
-	       TREE_PUBLIC (decl) ? 'F' : 'f');
+      dbxout_begin_complex_stabs ();
+      stabstr_I (DECL_ASSEMBLER_NAME (decl));
+      stabstr_S (TREE_PUBLIC (decl) ? ":F" : ":f");
       result = 1;
-
-      current_sym_code = N_FUN;
-      current_sym_addr = XEXP (DECL_RTL (decl), 0);
 
       if (TREE_TYPE (type))
 	dbxout_type (TREE_TYPE (type), 0);
@@ -2248,11 +3234,15 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
 	 mention the containing function name
 	 as well as (since dbx wants it) our own assembler-name.  */
       if (context != 0)
-	fprintf (asm_out_file, ",%s,%s",
-		 IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (decl)),
-		 IDENTIFIER_POINTER (DECL_NAME (context)));
+	{
+	  stabstr_C (',');
+	  stabstr_I (DECL_ASSEMBLER_NAME (decl));
+	  stabstr_C (',');
+	  stabstr_I (DECL_NAME (context));
+	}
 
-      dbxout_finish_symbol (decl);
+      dbxout_finish_complex_stabs (decl, N_FUN, XEXP (DECL_RTL (decl), 0),
+				   0, 0);
       break;
 
     case TYPE_DECL:
@@ -2281,14 +3271,14 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
 	int tag_needed = 1;
 	int did_output = 0;
 
-	if (DECL_NAME (decl)
             /* APPLE LOCAL begin gdb only used symbols */
+	if (DECL_NAME (decl)
 #ifdef DBX_ONLY_USED_SYMBOLS
             /* Do not generate a tag for incomplete records */
             && (COMPLETE_TYPE_P (type) || TREE_CODE (type) == VOID_TYPE)
 #endif
-            /* APPLE LOCAL end gdb only used symbols */
            )
+            /* APPLE LOCAL end gdb only used symbols */
 	  {
 	    /* Nonzero means we must output a tag as well as a typedef.  */
 	    tag_needed = 0;
@@ -2317,28 +3307,32 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
 		if (TREE_CODE (name) == TYPE_DECL)
 		  name = DECL_NAME (name);
 
-		current_sym_code = DBX_TYPE_DECL_STABS_CODE;
-		current_sym_value = 0;
-		current_sym_addr = 0;
-		current_sym_nchars = 2 + IDENTIFIER_LENGTH (name);
-
-		fprintf (asm_out_file, "%s\"%s:T", ASM_STABS_OP,
-			 IDENTIFIER_POINTER (name));
+		dbxout_begin_complex_stabs ();
+		stabstr_I (name);
+		stabstr_S (":T");
 		dbxout_type (type, 1);
-		dbxout_finish_symbol (NULL_TREE);
+		dbxout_finish_complex_stabs (0, DBX_TYPE_DECL_STABS_CODE,
+					     0, 0, 0);
 	      }
 
-	    /* Output .stabs (or whatever) and leading double quote.  */
-	    fprintf (asm_out_file, "%s\"", ASM_STABS_OP);
+	    dbxout_begin_complex_stabs ();
 
+	    /* Output leading class/struct qualifiers.
+	       ??? why not set have_used_extensions here ... because
+	       then the test of it below would always be true, I
+	       guess.  But it's not clear to me why we shouldn't do
+	       that always in extended mode.  */
 	    if (use_gnu_debug_info_extensions)
-	      {
-		/* Output leading class/struct qualifiers.  */
-		dbxout_class_name_qualifiers (decl);
-	      }
+	      dbxout_class_name_qualifiers (decl);
 
 	    /* Output typedef name.  */
-	    fprintf (asm_out_file, "%s:", IDENTIFIER_POINTER (DECL_NAME (decl)));
+	    /* APPLE LOCAL begin 4215975 */
+	    if (DECL_NAME (decl) == anon_place_holder)
+	      DECL_NAME (decl) = NULL_TREE;
+	    else
+	      stabstr_I (DECL_NAME (decl));
+	    /* APPLE LOCAL end 4215975 */
+	    stabstr_C (':');
 
 	    /* Short cut way to output a tag also.  */
 	    if ((TREE_CODE (type) == RECORD_TYPE
@@ -2351,16 +3345,15 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
 	      {
 		if (use_gnu_debug_info_extensions && have_used_extensions)
 		  {
-		    putc ('T', asm_out_file);
+		    stabstr_C ('T');
 		    TREE_ASM_WRITTEN (TYPE_NAME (type)) = 1;
 		  }
 	      }
 
-	    putc ('t', asm_out_file);
-	    current_sym_code = DBX_TYPE_DECL_STABS_CODE;
-
+	    stabstr_C ('t');
 	    dbxout_type (type, 1);
-	    dbxout_finish_symbol (decl);
+	    dbxout_finish_complex_stabs (decl, DBX_TYPE_DECL_STABS_CODE,
+					 0, 0, 0);
 	    did_output = 1;
 	  }
 
@@ -2371,7 +3364,11 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
 	    && (TREE_CODE (TYPE_NAME (type)) == IDENTIFIER_NODE
 		|| (DECL_NAME (TYPE_NAME (type)) != 0))
 	    && COMPLETE_TYPE_P (type)
-	    && !TREE_ASM_WRITTEN (TYPE_NAME (type)))
+	    /* APPLE LOCAL begin dbxout_type rewrite.  */
+	    && !TREE_ASM_WRITTEN (TYPE_NAME (type))
+	    && (TYPE_SYMTAB_ADDRESS (type) == 0
+		|| typevec[TYPE_SYMTAB_ADDRESS (type)].status != TYPE_DEFINED))
+	    /* APPLE LOCAL end dbxout_type rewrite.  */
 	  {
 	    /* For a TYPE_DECL with no name, but the type has a name,
 	       output a tag.
@@ -2382,37 +3379,33 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
 	    if (TREE_CODE (name) == TYPE_DECL)
 	      name = DECL_NAME (name);
 
-	    current_sym_code = DBX_TYPE_DECL_STABS_CODE;
-	    current_sym_value = 0;
-	    current_sym_addr = 0;
-	    current_sym_nchars = 2 + IDENTIFIER_LENGTH (name);
-
-	    fprintf (asm_out_file, "%s\"%s:T", ASM_STABS_OP,
-		     IDENTIFIER_POINTER (name));
+	    dbxout_begin_complex_stabs ();
+	    stabstr_I (name);
+	    stabstr_S (":T");
 	    dbxout_type (type, 1);
-	    dbxout_finish_symbol (NULL_TREE);
+	    dbxout_finish_complex_stabs (0, DBX_TYPE_DECL_STABS_CODE, 0, 0, 0);
 	    did_output = 1;
 	  }
 
-	/* If an enum type has no name, it cannot be referred to,
-	   but we must output it anyway, since the enumeration constants
-	   can be referred to.  */
+	/* If an enum type has no name, it cannot be referred to, but
+	   we must output it anyway, to record the enumeration
+	   constants.  */
+
 	if (!did_output && TREE_CODE (type) == ENUMERAL_TYPE)
 	  {
-	    current_sym_code = DBX_TYPE_DECL_STABS_CODE;
-	    current_sym_value = 0;
-	    current_sym_addr = 0;
-	    current_sym_nchars = 2;
-
+	    dbxout_begin_complex_stabs ();
 	    /* Some debuggers fail when given NULL names, so give this a
-	       harmless name of ` '.  */
-	    fprintf (asm_out_file, "%s\" :T", ASM_STABS_OP);
+	       harmless name of " " (Why not "(anon)"?).  */
+	    stabstr_S (" :T");
 	    dbxout_type (type, 1);
-	    dbxout_finish_symbol (NULL_TREE);
+	    dbxout_finish_complex_stabs (0, DBX_TYPE_DECL_STABS_CODE, 0, 0, 0);
 	  }
 
 	/* Prevent duplicate output of a typedef.  */
-	TREE_ASM_WRITTEN (decl) = 1;
+	/* APPLE LOCAL begin 4209318 */
+	if (did_output)
+	  TREE_ASM_WRITTEN (decl) = 1;
+	/* APPLE LOCAL end 4209318 */
 	break;
       }
 
@@ -2432,37 +3425,36 @@ dbxout_symbol (tree decl, int local ATTRIBUTE_UNUSED)
 	break;
 
       /* If the variable is really a constant
-	 and not written in memory, inform the debugger.  */
+	 and not written in memory, inform the debugger.
+
+	 ??? Why do we skip emitting the type and location in this case?  */
       if (TREE_STATIC (decl) && TREE_READONLY (decl)
 	  && DECL_INITIAL (decl) != 0
 	  && host_integerp (DECL_INITIAL (decl), 0)
 	  && ! TREE_ASM_WRITTEN (decl)
 	  && (DECL_CONTEXT (decl) == NULL_TREE
-	      || TREE_CODE (DECL_CONTEXT (decl)) == BLOCK))
+	      || TREE_CODE (DECL_CONTEXT (decl)) == BLOCK)
+	  && TREE_PUBLIC (decl) == 0)
 	{
-	  if (TREE_PUBLIC (decl) == 0)
-	    {
-	      /* The sun4 assembler does not grok this.  */
-	      const char *name = IDENTIFIER_POINTER (DECL_NAME (decl));
+	  /* The sun4 assembler does not grok this.  */
 
-	      if (TREE_CODE (TREE_TYPE (decl)) == INTEGER_TYPE
-		  || TREE_CODE (TREE_TYPE (decl)) == ENUMERAL_TYPE)
-		{
-		  HOST_WIDE_INT ival = tree_low_cst (DECL_INITIAL (decl), 0);
-		  fprintf (asm_out_file, "%s\"%s:c=i" HOST_WIDE_INT_PRINT_DEC
-			   "\",0x%x,0,0,0\n",
-			   ASM_STABS_OP, name, ival, N_LSYM);
-		  DBXOUT_DECR_NESTING;
-		  return 1;
-		}
-	      else if (TREE_CODE (TREE_TYPE (decl)) == REAL_TYPE)
-		{
-		  /* Don't know how to do this yet.  */
-		}
-	      break;
+	  if (TREE_CODE (TREE_TYPE (decl)) == INTEGER_TYPE
+	      || TREE_CODE (TREE_TYPE (decl)) == ENUMERAL_TYPE)
+	    {
+	      HOST_WIDE_INT ival = TREE_INT_CST_LOW (DECL_INITIAL (decl));
+
+	      dbxout_begin_complex_stabs ();
+	      stabstr_I (DECL_NAME (decl));
+	      stabstr_S (":c=i");
+	      stabstr_D (ival);
+	      dbxout_finish_complex_stabs (0, N_LSYM, 0, 0, 0);
+	      DBXOUT_DECR_NESTING;
+	      return 1;
 	    }
-	  /* else it is something we handle like a normal variable.  */
+	  else
+	    break;
 	}
+      /* else it is something we handle like a normal variable.  */
 
       SET_DECL_RTL (decl, eliminate_regs (DECL_RTL (decl), 0, NULL_RTX));
 #ifdef LEAF_REG_REMAP
@@ -2490,9 +3482,10 @@ static int
 dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
 {
   int letter = 0;
+  STAB_CODE_TYPE code;
+  rtx addr = 0;
+  int number = 0;
   int regno = -1;
-
-  emit_pending_bincls_if_required ();
 
   /* Don't mention a variable at all
      if it was completely optimized into nothingness.
@@ -2533,19 +3526,49 @@ dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
      no letter at all, and N_LSYM, for auto variable,
      r and N_RSYM for register variable.  */
 
-  if (MEM_P (home)
-      && GET_CODE (XEXP (home, 0)) == SYMBOL_REF)
+  if (MEM_P (home) && GET_CODE (XEXP (home, 0)) == SYMBOL_REF)
     {
       if (TREE_PUBLIC (decl))
 	{
 	  letter = 'G';
-	  current_sym_code = N_GSYM;
+	  code = N_GSYM;
 	}
       else
 	{
-	  current_sym_addr = XEXP (home, 0);
+	  addr = XEXP (home, 0);
 
 	  letter = decl_function_context (decl) ? 'V' : 'S';
+
+	  /* Some ports can transform a symbol ref into a label ref,
+	     because the symbol ref is too far away and has to be
+	     dumped into a constant pool.  Alternatively, the symbol
+	     in the constant pool might be referenced by a different
+	     symbol.  */
+	  if (GET_CODE (addr) == SYMBOL_REF
+	      && CONSTANT_POOL_ADDRESS_P (addr))
+	    {
+	      bool marked;
+	      rtx tmp = get_pool_constant_mark (addr, &marked);
+
+	      if (GET_CODE (tmp) == SYMBOL_REF)
+		{
+		  addr = tmp;
+		  if (CONSTANT_POOL_ADDRESS_P (addr))
+		    get_pool_constant_mark (addr, &marked);
+		  else
+		    marked = true;
+		}
+	      else if (GET_CODE (tmp) == LABEL_REF)
+		{
+		  addr = tmp;
+		  marked = true;
+		}
+
+	      /* If all references to the constant pool were optimized
+		 out, we just ignore the symbol.  */
+	      if (!marked)
+		return 0;
+	    }
 
 	  /* This should be the same condition as in assemble_variable, but
 	     we don't have access to dont_output_data here.  So, instead,
@@ -2554,57 +3577,26 @@ dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
 	  if (DECL_INITIAL (decl) == 0
 	      || (!strcmp (lang_hooks.name, "GNU C++")
 		  && DECL_INITIAL (decl) == error_mark_node))
-	    current_sym_code = N_LCSYM;
+	    code = N_LCSYM;
 	  else if (DECL_IN_TEXT_SECTION (decl))
 	    /* This is not quite right, but it's the closest
 	       of all the codes that Unix defines.  */
-	    current_sym_code = DBX_STATIC_CONST_VAR_CODE;
+	    code = DBX_STATIC_CONST_VAR_CODE;
 	  else
 	    {
-	      /* Some ports can transform a symbol ref into a label ref,
-		 because the symbol ref is too far away and has to be
-		 dumped into a constant pool.  Alternatively, the symbol
-		 in the constant pool might be referenced by a different
-		 symbol.  */
-	      if (GET_CODE (current_sym_addr) == SYMBOL_REF
-		  && CONSTANT_POOL_ADDRESS_P (current_sym_addr))
-		{
-		  bool marked;
-		  rtx tmp = get_pool_constant_mark (current_sym_addr, &marked);
-
-		  if (GET_CODE (tmp) == SYMBOL_REF)
-		    {
-		      current_sym_addr = tmp;
-		      if (CONSTANT_POOL_ADDRESS_P (current_sym_addr))
-		        get_pool_constant_mark (current_sym_addr, &marked);
-		      else
-			marked = true;
-		    }
-		  else if (GET_CODE (tmp) == LABEL_REF)
-		    {
-		      current_sym_addr = tmp;
-		      marked = true;
-		    }
-
-		   /* If all references to the constant pool were optimized
-		      out, we just ignore the symbol.  */
-		  if (!marked)
-		    return 0;
-		}
-
 	      /* Ultrix `as' seems to need this.  */
 #ifdef DBX_STATIC_STAB_DATA_SECTION
 	      data_section ();
 #endif
-	      current_sym_code = N_STSYM;
+	      code = N_STSYM;
 	    }
 	}
     }
   else if (regno >= 0)
     {
       letter = 'r';
-      current_sym_code = N_RSYM;
-      current_sym_value = DBX_REGISTER_NUMBER (regno);
+      code = N_RSYM;
+      number = DBX_REGISTER_NUMBER (regno);
     }
   else if (MEM_P (home)
 	   && (MEM_P (XEXP (home, 0))
@@ -2625,18 +3617,17 @@ dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
       if (REG_P (XEXP (home, 0)))
 	{
 	  letter = 'r';
-	  current_sym_code = N_RSYM;
+	  code = N_RSYM;
 	  if (REGNO (XEXP (home, 0)) >= FIRST_PSEUDO_REGISTER)
 	    return 0;
-	  current_sym_value = DBX_REGISTER_NUMBER (REGNO (XEXP (home, 0)));
+	  number = DBX_REGISTER_NUMBER (REGNO (XEXP (home, 0)));
 	}
       else
 	{
-	  current_sym_code = N_LSYM;
+	  code = N_LSYM;
 	  /* RTL looks like (MEM (MEM (PLUS (REG...) (CONST_INT...)))).
 	     We want the value of that CONST_INT.  */
-	  current_sym_value
-	    = DEBUGGER_AUTO_OFFSET (XEXP (XEXP (home, 0), 0));
+	  number = DEBUGGER_AUTO_OFFSET (XEXP (XEXP (home, 0), 0));
 	}
 
       /* Effectively do build_pointer_type, but don't cache this type,
@@ -2649,17 +3640,17 @@ dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
   else if (MEM_P (home)
 	   && REG_P (XEXP (home, 0)))
     {
-      current_sym_code = N_LSYM;
-      current_sym_value = DEBUGGER_AUTO_OFFSET (XEXP (home, 0));
+      code = N_LSYM;
+      number = DEBUGGER_AUTO_OFFSET (XEXP (home, 0));
     }
   else if (MEM_P (home)
 	   && GET_CODE (XEXP (home, 0)) == PLUS
 	   && GET_CODE (XEXP (XEXP (home, 0), 1)) == CONST_INT)
     {
-      current_sym_code = N_LSYM;
+      code = N_LSYM;
       /* RTL looks like (MEM (PLUS (REG...) (CONST_INT...)))
 	 We want the value of that CONST_INT.  */
-      current_sym_value = DEBUGGER_AUTO_OFFSET (XEXP (home, 0));
+      number = DEBUGGER_AUTO_OFFSET (XEXP (home, 0));
     }
   else if (MEM_P (home)
 	   && GET_CODE (XEXP (home, 0)) == CONST)
@@ -2675,9 +3666,9 @@ dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
 	 variable, thereby avoiding the need for a register.  In such
 	 cases we're forced to lie to debuggers and tell them that
 	 this variable was itself `static'.  */
-      current_sym_code = N_LCSYM;
+      code = N_LCSYM;
       letter = 'V';
-      current_sym_addr = XEXP (XEXP (home, 0), 0);
+      addr = XEXP (XEXP (home, 0), 0);
     }
   else if (GET_CODE (home) == CONCAT)
     {
@@ -2698,8 +3689,6 @@ dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
       else
 	dbxout_symbol_location (decl, subtype, "$real", XEXP (home, 0));
 
-      dbxout_prepare_symbol (decl);
-
       if (WORDS_BIG_ENDIAN)
 	dbxout_symbol_location (decl, subtype, "$real", XEXP (home, 1));
       else
@@ -2713,18 +3702,22 @@ dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
     return 0;
 
   /* Ok, start a symtab entry and output the variable name.  */
+  emit_pending_bincls_if_required ();
   FORCE_TEXT;
 
 #ifdef DBX_STATIC_BLOCK_START
-  DBX_STATIC_BLOCK_START (asm_out_file, current_sym_code);
+  /* APPLE LOCAL ss2 */
+  DBX_STATIC_BLOCK_START (dbx_out_file, code);
 #endif
 
+  dbxout_begin_complex_stabs_noforcetext ();
   dbxout_symbol_name (decl, suffix, letter);
   dbxout_type (type, 0);
-  dbxout_finish_symbol (decl);
+  dbxout_finish_complex_stabs (decl, code, addr, 0, number);
 
 #ifdef DBX_STATIC_BLOCK_END
-  DBX_STATIC_BLOCK_END (asm_out_file, current_sym_code);
+  /* APPLE LOCAL ss2 */
+  DBX_STATIC_BLOCK_END (dbx_out_file, code);
 #endif
   return 1;
 }
@@ -2735,7 +3728,7 @@ dbxout_symbol_location (tree decl, tree type, const char *suffix, rtx home)
 static void
 dbxout_symbol_name (tree decl, const char *suffix, int letter)
 {
-  const char *name;
+  tree name;
 
   if (DECL_CONTEXT (decl) 
       && (TYPE_P (DECL_CONTEXT (decl))
@@ -2744,50 +3737,22 @@ dbxout_symbol_name (tree decl, const char *suffix, int letter)
        or a namespace member, we must put out the mangled name instead of the
        DECL_NAME.  Note also that static member (variable) names DO NOT begin
        with underscores in .stabs directives.  */
-    name = IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (decl));
+    name = DECL_ASSEMBLER_NAME (decl);
   else
     /* ...but if we're function-local, we don't want to include the junk
        added by ASM_FORMAT_PRIVATE_NAME.  */
-    name = IDENTIFIER_POINTER (DECL_NAME (decl));
+    name = DECL_NAME (decl);
 
-  if (name == 0)
-    name = "(anon)";
-  fprintf (asm_out_file, "%s\"%s%s:", ASM_STABS_OP, name,
-	   (suffix ? suffix : ""));
-
-  if (letter)
-    putc (letter, asm_out_file);
-}
-
-static void
-dbxout_prepare_symbol (tree decl ATTRIBUTE_UNUSED)
-{
-  /* Initialize variables used to communicate each symbol's debug
-     information to dbxout_finish_symbol with zeroes.  */
-
-  /* Cast avoids warning in old compilers.  */
-  current_sym_code = (STAB_CODE_TYPE) 0;
-  current_sym_value = 0;
-  current_sym_addr = 0;
-}
-
-static void
-dbxout_finish_symbol (tree sym)
-{
-#ifdef DBX_FINISH_SYMBOL
-  DBX_FINISH_SYMBOL (asm_out_file, sym);
-#else
-  int line = 0;
-  if (use_gnu_debug_info_extensions && sym != 0)
-    line = DECL_SOURCE_LINE (sym);
-
-  fprintf (asm_out_file, "\",%d,0,%d,", current_sym_code, line);
-  if (current_sym_addr)
-    output_addr_const (asm_out_file, current_sym_addr);
+  if (name)
+    stabstr_I (name);
   else
-    fprintf (asm_out_file, "%d", current_sym_value);
-  putc ('\n', asm_out_file);
-#endif
+    stabstr_S ("(anon)");
+
+  if (suffix)
+    stabstr_S (suffix);
+  stabstr_C (':');
+  if (letter)
+    stabstr_C (letter);
 }
 
 /* Output definitions of all the decls in a chain. Return nonzero if
@@ -2821,7 +3786,6 @@ void
 dbxout_parms (tree parms)
 {
   ++debug_nesting;
-
   emit_pending_bincls_if_required ();
 
   for (; parms; parms = TREE_CHAIN (parms))
@@ -2830,7 +3794,10 @@ dbxout_parms (tree parms)
 	&& DECL_RTL_SET_P (parms)
 	&& DECL_INCOMING_RTL (parms))
       {
-	dbxout_prepare_symbol (parms);
+	tree eff_type;
+	char letter;
+	STAB_CODE_TYPE code;
+	int number;
 
 	/* Perform any necessary register eliminations on the parameter's rtl,
 	   so that the debugging output will be accurate.  */
@@ -2847,101 +3814,60 @@ dbxout_parms (tree parms)
 
 	if (PARM_PASSED_IN_MEMORY (parms))
 	  {
-	    rtx addr = XEXP (DECL_INCOMING_RTL (parms), 0);
+	    rtx inrtl = XEXP (DECL_INCOMING_RTL (parms), 0);
 
 	    /* ??? Here we assume that the parm address is indexed
 	       off the frame pointer or arg pointer.
 	       If that is not true, we produce meaningless results,
 	       but do not crash.  */
-	    if (GET_CODE (addr) == PLUS
-		&& GET_CODE (XEXP (addr, 1)) == CONST_INT)
-	      current_sym_value = INTVAL (XEXP (addr, 1));
+	    if (GET_CODE (inrtl) == PLUS
+		&& GET_CODE (XEXP (inrtl, 1)) == CONST_INT)
+	      number = INTVAL (XEXP (inrtl, 1));
 	    else
-	      current_sym_value = 0;
+	      number = 0;
 
-	    current_sym_code = N_PSYM;
-	    current_sym_addr = 0;
+	    code = N_PSYM;
+	    number = DEBUGGER_ARG_OFFSET (number, inrtl);
+	    letter = 'p';
 
-	    FORCE_TEXT;
-	    if (DECL_NAME (parms))
-	      {
-		current_sym_nchars = 2 + IDENTIFIER_LENGTH (DECL_NAME (parms));
-		fprintf (asm_out_file, "%s\"%s:p", ASM_STABS_OP,
-			 IDENTIFIER_POINTER (DECL_NAME (parms)));
-	      }
-	    else
-	      {
-		current_sym_nchars = 8;
-		fprintf (asm_out_file, "%s\"(anon):p", ASM_STABS_OP);
-	      }
-
-	    /* It is quite tempting to use:
-
-	           dbxout_type (TREE_TYPE (parms), 0);
-
-	       as the next statement, rather than using DECL_ARG_TYPE(), so
-	       that gcc reports the actual type of the parameter, rather
-	       than the promoted type.  This certainly makes GDB's life
-	       easier, at least for some ports.  The change is a bad idea
-	       however, since GDB expects to be able access the type without
-	       performing any conversions.  So for example, if we were
-	       passing a float to an unprototyped function, gcc will store a
-	       double on the stack, but if we emit a stab saying the type is a
-	       float, then gdb will only read in a single value, and this will
-	       produce an erroneous value.  */
-	    dbxout_type (DECL_ARG_TYPE (parms), 0);
-	    current_sym_value = DEBUGGER_ARG_OFFSET (current_sym_value, addr);
-	    dbxout_finish_symbol (parms);
+	    /* It is quite tempting to use TREE_TYPE (parms) instead
+	       of DECL_ARG_TYPE (parms) for the eff_type, so that gcc
+	       reports the actual type of the parameter, rather than
+	       the promoted type.  This certainly makes GDB's life
+	       easier, at least for some ports.  The change is a bad
+	       idea however, since GDB expects to be able access the
+	       type without performing any conversions.  So for
+	       example, if we were passing a float to an unprototyped
+	       function, gcc will store a double on the stack, but if
+	       we emit a stab saying the type is a float, then gdb
+	       will only read in a single value, and this will produce
+	       an erroneous value.  */
+	    eff_type = DECL_ARG_TYPE (parms);
 	  }
 	else if (REG_P (DECL_RTL (parms)))
 	  {
 	    rtx best_rtl;
-	    char regparm_letter;
-	    tree parm_type;
+
 	    /* Parm passed in registers and lives in registers or nowhere.  */
+	    code = DBX_REGPARM_STABS_CODE;
+	    letter = DBX_REGPARM_STABS_LETTER;
 
-	    current_sym_code = DBX_REGPARM_STABS_CODE;
-	    regparm_letter = DBX_REGPARM_STABS_LETTER;
-	    current_sym_addr = 0;
+	    /* For parms passed in registers, it is better to use the
+	       declared type of the variable, not the type it arrived in.  */
+	    eff_type = TREE_TYPE (parms);
 
-	    /* If parm lives in a register, use that register;
-	       pretend the parm was passed there.  It would be more consistent
-	       to describe the register where the parm was passed,
-	       but in practice that register usually holds something else.
-
-	       If we use DECL_RTL, then we must use the declared type of
-	       the variable, not the type that it arrived in.  */
+	    /* If parm lives in a register, use that register; pretend
+	       the parm was passed there.  It would be more consistent
+	       to describe the register where the parm was passed, but
+	       in practice that register usually holds something else.
+	       If the parm lives nowhere, use the register where it
+	       was passed.  */
 	    if (REGNO (DECL_RTL (parms)) < FIRST_PSEUDO_REGISTER)
-	      {
-		best_rtl = DECL_RTL (parms);
-		parm_type = TREE_TYPE (parms);
-	      }
-	    /* If the parm lives nowhere, use the register where it was
-	       passed.  It is also better to use the declared type here.  */
+	      best_rtl = DECL_RTL (parms);
 	    else
-	      {
-		best_rtl = DECL_INCOMING_RTL (parms);
-		parm_type = TREE_TYPE (parms);
-	      }
-	    current_sym_value = DBX_REGISTER_NUMBER (REGNO (best_rtl));
+	      best_rtl = DECL_INCOMING_RTL (parms);
 
-	    FORCE_TEXT;
-	    if (DECL_NAME (parms))
-	      {
-		current_sym_nchars = 2 + IDENTIFIER_LENGTH (DECL_NAME (parms));
-		fprintf (asm_out_file, "%s\"%s:%c", ASM_STABS_OP,
-			 IDENTIFIER_POINTER (DECL_NAME (parms)),
-			 regparm_letter);
-	      }
-	    else
-	      {
-		current_sym_nchars = 8;
-		fprintf (asm_out_file, "%s\"(anon):%c", ASM_STABS_OP,
-			 regparm_letter);
-	      }
-
-	    dbxout_type (parm_type, 0);
-	    dbxout_finish_symbol (parms);
+	    number = DBX_REGISTER_NUMBER (REGNO (best_rtl));
 	  }
 	else if (MEM_P (DECL_RTL (parms))
 		 && REG_P (XEXP (DECL_RTL (parms), 0))
@@ -2958,46 +3884,22 @@ dbxout_parms (tree parms)
 	       The debugger will know from the type
 	       that it was actually passed by invisible reference.  */
 
-	    char regparm_letter;
-	    /* Parm passed in registers and lives in registers or nowhere.  */
-
-	    current_sym_code = DBX_REGPARM_STABS_CODE;
-
-	    if (use_gnu_debug_info_extensions)
-	      /* GDB likes this marked with a special letter.  */
-	      regparm_letter = 'a';
-	    else
-	      regparm_letter = DBX_REGPARM_STABS_LETTER;
+	    code = DBX_REGPARM_STABS_CODE;
+ 
+	    /* GDB likes this marked with a special letter.  */
+	    letter = (use_gnu_debug_info_extensions
+		      ? 'a' : DBX_REGPARM_STABS_LETTER);
+	    eff_type = TREE_TYPE (parms);
 
 	    /* DECL_RTL looks like (MEM (REG...).  Get the register number.
 	       If it is an unallocated pseudo-reg, then use the register where
-	       it was passed instead.  */
+	       it was passed instead.
+	       ??? Why is DBX_REGISTER_NUMBER not used here?  */
+
 	    if (REGNO (XEXP (DECL_RTL (parms), 0)) < FIRST_PSEUDO_REGISTER)
-	      current_sym_value = REGNO (XEXP (DECL_RTL (parms), 0));
+	      number = REGNO (XEXP (DECL_RTL (parms), 0));
 	    else
-	      current_sym_value = REGNO (DECL_INCOMING_RTL (parms));
-
-	    current_sym_addr = 0;
-
-	    FORCE_TEXT;
-	    if (DECL_NAME (parms))
-	      {
-		current_sym_nchars
-		  = 2 + strlen (IDENTIFIER_POINTER (DECL_NAME (parms)));
-
-		fprintf (asm_out_file, "%s\"%s:%c", ASM_STABS_OP,
-			 IDENTIFIER_POINTER (DECL_NAME (parms)),
-			 regparm_letter);
-	      }
-	    else
-	      {
-		current_sym_nchars = 8;
-		fprintf (asm_out_file, "%s\"(anon):%c", ASM_STABS_OP,
-			 regparm_letter);
-	      }
-
-	    dbxout_type (TREE_TYPE (parms), 0);
-	    dbxout_finish_symbol (parms);
+	      number = REGNO (DECL_INCOMING_RTL (parms));
 	  }
 	else if (MEM_P (DECL_RTL (parms))
 		 && MEM_P (XEXP (DECL_RTL (parms), 0)))
@@ -3006,25 +3908,18 @@ dbxout_parms (tree parms)
 	       living on the stack.  DECL_RTL looks like
 	       (MEM (MEM (PLUS (REG ...) (CONST_INT ...)))) or it
 	       could look like (MEM (MEM (REG))).  */
-	    const char *const decl_name = (DECL_NAME (parms)
-				     ? IDENTIFIER_POINTER (DECL_NAME (parms))
-				     : "(anon)");
-	    if (REG_P (XEXP (XEXP (DECL_RTL (parms), 0), 0)))
-	      current_sym_value = 0;
+
+	    code = N_PSYM;
+	    letter = 'v';
+	    eff_type = TREE_TYPE (parms);
+
+	    if (!REG_P (XEXP (XEXP (DECL_RTL (parms), 0), 0)))
+	      number = INTVAL (XEXP (XEXP (XEXP (DECL_RTL (parms), 0), 0), 1));
 	    else
-	      current_sym_value
-	        = INTVAL (XEXP (XEXP (XEXP (DECL_RTL (parms), 0), 0), 1));
-	    current_sym_addr = 0;
-	    current_sym_code = N_PSYM;
+	      number = 0;
 
-	    FORCE_TEXT;
-	    fprintf (asm_out_file, "%s\"%s:v", ASM_STABS_OP, decl_name);
-
-	    current_sym_value
-	      = DEBUGGER_ARG_OFFSET (current_sym_value,
-				     XEXP (XEXP (DECL_RTL (parms), 0), 0));
-	    dbxout_type (TREE_TYPE (parms), 0);
-	    dbxout_finish_symbol (parms);
+	    number = DEBUGGER_ARG_OFFSET (number,
+					  XEXP (XEXP (DECL_RTL (parms), 0), 0));
 	  }
 	else if (MEM_P (DECL_RTL (parms))
 		 && XEXP (DECL_RTL (parms), 0) != const0_rtx
@@ -3035,51 +3930,52 @@ dbxout_parms (tree parms)
 	  {
 	    /* Parm was passed in registers but lives on the stack.  */
 
-	    current_sym_code = N_PSYM;
+	    code = N_PSYM;
+	    letter = 'p';
+	    eff_type = TREE_TYPE (parms);
+
 	    /* DECL_RTL looks like (MEM (PLUS (REG...) (CONST_INT...))),
 	       in which case we want the value of that CONST_INT,
 	       or (MEM (REG ...)),
 	       in which case we use a value of zero.  */
-	    if (REG_P (XEXP (DECL_RTL (parms), 0)))
-	      current_sym_value = 0;
+	    if (!REG_P (XEXP (DECL_RTL (parms), 0)))
+	      number = INTVAL (XEXP (XEXP (DECL_RTL (parms), 0), 1));
 	    else
-		current_sym_value
-		  = INTVAL (XEXP (XEXP (DECL_RTL (parms), 0), 1));
+	      number = 0;
 
-	    current_sym_addr = 0;
+/* APPLE LOCAL begin ARM prefer SP to FP */
+#ifdef TARGET_ARM
+	    /* I'm not sure why this wasn't here in the first place --
+	       we surely need it.  */
+	    number = DEBUGGER_ARG_OFFSET (number,
+					  XEXP (DECL_RTL (parms), 0));
+#endif
+/* APPLE LOCAL end ARM prefer SP to FP */
 
 	    /* Make a big endian correction if the mode of the type of the
 	       parameter is not the same as the mode of the rtl.  */
 	    if (BYTES_BIG_ENDIAN
 		&& TYPE_MODE (TREE_TYPE (parms)) != GET_MODE (DECL_RTL (parms))
 		&& GET_MODE_SIZE (TYPE_MODE (TREE_TYPE (parms))) < UNITS_PER_WORD)
-	      {
-		current_sym_value +=
-		    GET_MODE_SIZE (GET_MODE (DECL_RTL (parms)))
-		    - GET_MODE_SIZE (TYPE_MODE (TREE_TYPE (parms)));
-	      }
-
-	    FORCE_TEXT;
-	    if (DECL_NAME (parms))
-	      {
-		current_sym_nchars
-		  = 2 + strlen (IDENTIFIER_POINTER (DECL_NAME (parms)));
-
-		fprintf (asm_out_file, "%s\"%s:p", ASM_STABS_OP,
-			 IDENTIFIER_POINTER (DECL_NAME (parms)));
-	      }
-	    else
-	      {
-		current_sym_nchars = 8;
-		fprintf (asm_out_file, "%s\"(anon):p", ASM_STABS_OP);
-	      }
-
-	    current_sym_value
-	      = DEBUGGER_ARG_OFFSET (current_sym_value,
-				     XEXP (DECL_RTL (parms), 0));
-	    dbxout_type (TREE_TYPE (parms), 0);
-	    dbxout_finish_symbol (parms);
+	      number += (GET_MODE_SIZE (GET_MODE (DECL_RTL (parms)))
+			 - GET_MODE_SIZE (TYPE_MODE (TREE_TYPE (parms))));
 	  }
+	else
+	  /* ??? We don't know how to represent this argument.  */
+	  continue;
+
+	dbxout_begin_complex_stabs ();
+	    
+	if (DECL_NAME (parms))
+	  {
+	    stabstr_I (DECL_NAME (parms));
+	    stabstr_C (':');
+	  }
+	else
+	  stabstr_S ("(anon):");
+	stabstr_C (letter);
+	dbxout_type (eff_type, 0);
+	dbxout_finish_complex_stabs (parms, code, 0, 0, number);
       }
   DBXOUT_DECR_NESTING;
 }
@@ -3103,8 +3999,6 @@ dbxout_reg_parms (tree parms)
   for (; parms; parms = TREE_CHAIN (parms))
     if (DECL_NAME (parms) && PARM_PASSED_IN_MEMORY (parms))
       {
-	dbxout_prepare_symbol (parms);
-
 	/* Report parms that live in registers during the function
 	   but were passed in memory.  */
 	if (REG_P (DECL_RTL (parms))
@@ -3131,9 +4025,8 @@ dbxout_args (tree args)
 {
   while (args)
     {
-      putc (',', asm_out_file);
+      stabstr_C (',');
       dbxout_type (TREE_VALUE (args), 0);
-      CHARS (1);
       args = TREE_CHAIN (args);
     }
 }
@@ -3146,16 +4039,14 @@ dbx_output_lbrac (const char *label,
 		  const char *begin_label ATTRIBUTE_UNUSED)
 {
 #ifdef DBX_OUTPUT_LBRAC
-  DBX_OUTPUT_LBRAC (asm_out_file, label);
+  /* APPLE LOCAL ss2 */
+  DBX_OUTPUT_LBRAC (dbx_out_file, label);
 #else
-  fprintf (asm_out_file, "%s%d,0,0,", ASM_STABN_OP, N_LBRAC);
-  assemble_name (asm_out_file, label);
+  dbxout_begin_stabn (N_LBRAC);
   if (DBX_BLOCKS_FUNCTION_RELATIVE)
-    {
-      putc ('-', asm_out_file);
-      assemble_name (asm_out_file, begin_label);
-    }
-  fprintf (asm_out_file, "\n");
+    dbxout_stab_value_label_diff (label, begin_label);
+  else
+    dbxout_stab_value_label (label);
 #endif
 }
 
@@ -3167,16 +4058,14 @@ dbx_output_rbrac (const char *label,
 		  const char *begin_label ATTRIBUTE_UNUSED)
 {
 #ifdef DBX_OUTPUT_RBRAC
-  DBX_OUTPUT_RBRAC (asm_out_file, label);
+  /* APPLE LOCAL ss2 */
+  DBX_OUTPUT_RBRAC (dbx_out_file, label);
 #else
-  fprintf (asm_out_file, "%s%d,0,0,", ASM_STABN_OP, N_RBRAC);
-  assemble_name (asm_out_file, label);
+  dbxout_begin_stabn (N_RBRAC);
   if (DBX_BLOCKS_FUNCTION_RELATIVE)
-    {
-      putc ('-', asm_out_file);
-      assemble_name (asm_out_file, begin_label);
-    }
-  fprintf (asm_out_file, "\n");
+    dbxout_stab_value_label_diff (label, begin_label);
+  else
+    dbxout_stab_value_label (label);
 #endif
 }
 
@@ -3200,8 +4089,8 @@ dbx_output_rbrac (const char *label,
 static void
 dbxout_block (tree block, int depth, tree args)
 {
-  const char *begin_label;
-  begin_label = XSTR (XEXP (DECL_RTL (current_function_decl), 0), 0);
+  const char *begin_label
+    = XSTR (XEXP (DECL_RTL (current_function_decl), 0), 0);
 
   while (block)
     {
@@ -3244,10 +4133,11 @@ dbxout_block (tree block, int depth, tree args)
 		  tree decl = BLOCK_VARS (block);
 		  while (decl)
 		    {
-		      fprintf (asm_out_file, "%s\"%s:C1\",%d,0,0,", ASM_STABS_OP,
-			       IDENTIFIER_POINTER (DECL_NAME (decl)), N_CATCH);
-		      assemble_name (asm_out_file, scope_start);
-		      fprintf (asm_out_file, "\n");
+		      dbxout_begin_complex_stabs ();
+		      stabstr_I (DECL_NAME (decl));
+		      stabstr_S (":C1");
+		      dbxout_finish_complex_stabs (0, N_CATCH, 0,
+						   scope_start, 0);
 		      decl = TREE_CHAIN (decl);
 		    }
 		}
@@ -3276,6 +4166,127 @@ dbxout_block (tree block, int depth, tree args)
     }
 }
 
+/* APPLE LOCAL begin dbxout_type rewrite.  */
+/* Return TRUE if it is suitable to describe TYPE as cross referenced.  */
+
+#ifdef DBX_NO_XREFS
+static bool
+dbxout_cross_ref_type_p (tree type)
+{
+  return ((TYPE_NAME (type) != 0
+	   && ! (TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
+		 && DECL_IGNORED_P (TYPE_NAME (type))))
+	  || !COMPLETE_TYPE_P (type)
+	  /* No way in DBX fmt to describe a variable size.  */
+	  || ! host_integerp (TYPE_SIZE (type), 1));
+}
+#endif
+
+/* Output type description in a new LSYM stab along with its name.  */
+
+static void
+dbxout_type_with_name (tree type)
+{
+
+  /* Avoid repetition.  */
+  if (TYPE_SYMTAB_ADDRESS (type) != 0
+      && typevec[TYPE_SYMTAB_ADDRESS (type)].status == TYPE_DEFINED)
+    return;
+  
+  dbxout_begin_complex_stabs ();
+  if (!TYPE_VOLATILE (type)
+      && !TYPE_READONLY (type)
+      && TYPE_NAME (type)
+      && TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
+      && DECL_NAME (TYPE_NAME (type))
+      && COMPLETE_TYPE_P (type))
+    {
+      stabstr_I (DECL_NAME (TYPE_NAME (type)));
+      stabstr_C (':');
+      stabstr_C ('t');
+    }
+  else if ((TREE_CODE (type) == RECORD_TYPE
+	   || TREE_CODE (type) == UNION_TYPE
+	   || TREE_CODE (type) == QUAL_UNION_TYPE
+	   || TREE_CODE (type) == ENUMERAL_TYPE)
+	   && COMPLETE_TYPE_P (type)
+	   && !TYPE_QUALS (type))
+    {
+      if (TYPE_NAME (type) && TREE_CODE (TYPE_NAME (type)) != TYPE_DECL)
+	stabstr_I (TYPE_NAME (type));
+      else if (TYPE_NAME (type)
+	       && DECL_NAME (TYPE_NAME (type)))
+	stabstr_I (DECL_NAME (TYPE_NAME (type)));
+      stabstr_C (':');
+      stabstr_C ('T');
+    }
+  else 
+    {
+      stabstr_C (':');
+      stabstr_C ('t');
+    }
+  dbxout_type (type, 2);
+  dbxout_finish_complex_stabs (0, N_LSYM, 0, 0, 0);
+}
+
+static GTY ((length ("type_queue_index"))) tree *type_queue;
+static GTY (()) int type_queue_index = 0;
+static GTY (()) int type_queue_size = 0;
+
+/* Generate the type definitions for queued up types.  */
+
+void
+dbxout_flush_type_queue (void)
+{
+  int i;
+
+  for (i = 0; i < type_queue_index; ++i) 
+    {
+      tree type = type_queue[i];
+      dbxout_type_with_name (type);
+    }
+  type_queue_index = 0;
+}
+
+
+/* Add TYPE into the queue.  */
+
+static void
+dbxout_queue_type (tree type)
+{
+  /* Get the type number first.  */
+  dbxout_next_type_number (type);
+
+  if (typevec[TYPE_SYMTAB_ADDRESS (type)].status == TYPE_QUEUED
+      || typevec[TYPE_SYMTAB_ADDRESS (type)].status == TYPE_DEFINED)
+    return;
+
+  typevec[TYPE_SYMTAB_ADDRESS (type)].status = TYPE_QUEUED;
+  if (type_queue_index >= type_queue_size)
+    {
+      type_queue_size += 10;
+      type_queue = ggc_realloc (type_queue,
+			     type_queue_size * sizeof (tree));
+    }
+
+  type_queue[type_queue_index++] = type;
+}
+
+/* Flush remaining types and free the queue.  */
+
+static void
+dbxout_free_type_queue (void)
+{
+  dbxout_flush_type_queue ();
+  if (type_queue)
+    {
+      ggc_free (type_queue);
+      type_queue = NULL;
+      type_queue_size = 0;
+    }
+}
+/* APPLE LOCAL end dbxout_type rewrite.  */
+
 /* Output the information about a function and its arguments and result.
    Usually this follows the function's code,
    but on some systems, it comes before.  */
@@ -3284,7 +4295,12 @@ dbxout_block (tree block, int depth, tree args)
 static void
 dbxout_begin_function (tree decl)
 {
-  int saved_tree_used1 = TREE_USED (decl);
+  int saved_tree_used1;
+
+  if (DECL_IGNORED_P (decl))
+    return;
+
+  saved_tree_used1 = TREE_USED (decl);
   TREE_USED (decl) = 1;
   if (DECL_NAME (DECL_RESULT (decl)) != 0)
     {

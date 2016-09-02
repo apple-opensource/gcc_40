@@ -1,5 +1,5 @@
 /* Callgraph based intraprocedural optimizations.
-   Copyright (C) 2003, 2004 Free Software Foundation, Inc.
+   Copyright (C) 2003, 2004, 2005 Free Software Foundation, Inc.
    Contributed by Jan Hubicka
 
 This file is part of GCC.
@@ -105,7 +105,7 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 	mark_referenced call in assemble_variable functions referenced by
 	static variables are noticed too.
 
-	The intra-procedural information is produced and it's existence
+	The intra-procedural information is produced and its existence
 	indicated by global_info_ready.  Once this flag is set it is impossible
 	to change function from !reachable to reachable and thus
 	assemble_variable no longer call mark_referenced.
@@ -304,7 +304,9 @@ cgraph_assemble_pending_functions (void)
 
       cgraph_nodes_queue = cgraph_nodes_queue->next_needed;
       n->next_needed = NULL;
-      if (!n->global.inlined_to && !DECL_EXTERNAL (n->decl))
+      if (!n->global.inlined_to
+	  && !n->alias
+	  && !DECL_EXTERNAL (n->decl))
 	{
 	  cgraph_expand_function (n);
 	  output = true;
@@ -323,6 +325,12 @@ void
 cgraph_finalize_function (tree decl, bool nested)
 {
   struct cgraph_node *node = cgraph_node (decl);
+
+  /* APPLE LOCAL begin regparmandstackparm */
+#if TARGET_MACHO && defined TARGET_SSE2
+  ix86_darwin_handle_regparmandstackparm (decl);
+#endif
+  /* APPLE LOCAL end regparmandstackparm */
 
   if (node->local.finalized)
     {
@@ -350,8 +358,17 @@ cgraph_finalize_function (tree decl, bool nested)
       memset (&node->rtl, 0, sizeof (node->rtl));
       node->analyzed = false;
       node->local.redefined_extern_inline = true;
-      while (node->callees)
-	cgraph_remove_edge (node->callees);
+
+      if (!flag_unit_at_a_time)
+	{
+	  struct cgraph_node *n;
+
+	  for (n = cgraph_nodes; n; n = n->next)
+	    if (n->global.inlined_to == node)
+	      cgraph_remove_node (n);
+	}
+
+      cgraph_node_remove_callees (node);
 
       /* We may need to re-queue the node for assembling in case
          we already proceeded it and ignored as not needed.  */
@@ -530,8 +547,8 @@ cgraph_create_edges (struct cgraph_node *node, tree body)
 
 static bool error_found;
 
-/* Callbrack of verify_cgraph_node.  Check that all call_exprs have cgraph
-   nodes.  */
+/* Callback of verify_cgraph_node.  Check that all call_exprs have
+   cgraph nodes.  */
 
 static tree
 verify_cgraph_node_1 (tree *tp, int *walk_subtrees, void *data)
@@ -718,6 +735,8 @@ cgraph_finalize_compilation_unit (void)
 {
   struct cgraph_node *node;
 
+  finish_aliases_1 ();
+
   if (!flag_unit_at_a_time)
     {
       cgraph_assemble_pending_functions ();
@@ -768,6 +787,12 @@ cgraph_finalize_compilation_unit (void)
 
       cgraph_varpool_assemble_pending_decls ();
     }
+
+  /* APPLE LOCAL begin regparmandstackparm */
+#if TARGET_MACHO && defined TARGET_SSE2
+  ix86_darwin_redirect_calls ();
+#endif
+  /* APPLE LOCAL end regparmandstackparm */
 
   /* Collect entry points to the unit.  */
 
@@ -880,8 +905,7 @@ cgraph_expand_function (struct cgraph_node *node)
       DECL_INITIAL (node->decl) = error_mark_node;
       /* Eliminate all call edges.  This is important so the call_expr no longer
 	 points to the dead function body.  */
-      while (node->callees)
-	cgraph_remove_edge (node->callees);
+      cgraph_node_remove_callees (node);
     }
 }
 
@@ -1043,8 +1067,7 @@ cgraph_remove_unreachable_nodes (void)
 		      DECL_STRUCT_FUNCTION (node->decl) = NULL;
 		      DECL_INITIAL (node->decl) = error_mark_node;
 		    }
-		  while (node->callees)
-		    cgraph_remove_edge (node->callees);
+		  cgraph_node_remove_callees (node);
 		  node->analyzed = false;
 		}
 	      else
@@ -1068,7 +1091,12 @@ static int
 cgraph_estimate_size_after_inlining (int times, struct cgraph_node *to,
 				     struct cgraph_node *what)
 {
-  return (what->global.insns - INSNS_PER_CALL) * times + to->global.insns;
+  tree fndecl = what->decl;
+  tree arg;
+  int call_insns = PARAM_VALUE (PARAM_INLINE_CALL_COST);
+  for (arg = DECL_ARGUMENTS (fndecl); arg; arg = TREE_CHAIN (arg))
+    call_insns += estimate_move_cost (TREE_TYPE (arg));
+  return (what->global.insns - call_insns) * times + to->global.insns;
 }
 
 /* Estimate the growth caused by inlining NODE into all callees.  */
@@ -1188,7 +1216,8 @@ cgraph_mark_inline_edge (struct cgraph_edge *e)
       to->global.insns = new_insns;
     }
   gcc_assert (what->global.inlined_to == to);
-  overall_insns += new_insns - old_insns;
+  if (new_insns > old_insns)
+    overall_insns += new_insns - old_insns;
   ncalls_inlined++;
 }
 
@@ -1465,12 +1494,31 @@ cgraph_decide_inlining_of_small_functions (void)
 
   if (cgraph_dump_file)
     fprintf (cgraph_dump_file, "\nDeciding on smaller functions:\n");
+
+  /* APPLE LOCAL begin ARM 4741256 */
+#ifdef TARGET_ARM
+  while ((node = fibheap_extract_min (heap)))
+#else
   while (overall_insns <= max_insns && (node = fibheap_extract_min (heap)))
+#endif
     {
       struct cgraph_edge *e, *next;
       int old_insns = overall_insns;
 
       heap_node[node->uid] = NULL;
+
+#ifdef TARGET_ARM
+      /* Accept candidates with negative estimated growth even if we've
+	 exceeded the inline-unit-growth parameter. */
+      if (overall_insns > max_insns && cgraph_estimate_growth (node) >= 0)
+	{
+	  if (!node->local.disregard_inline_limits)
+	    cgraph_set_inline_failed (node, N_("--param inline-unit-growth limit reached"));
+	  continue;
+	}
+#endif
+  /* APPLE LOCAL end ARM 4741256 */
+
       if (cgraph_dump_file)
 	fprintf (cgraph_dump_file, 
 		 "\nConsidering %s with %i insns\n"
@@ -1842,6 +1890,9 @@ cgraph_optimize (void)
 #endif
   if (!flag_unit_at_a_time)
     return;
+
+  process_pending_assemble_externals ();
+
   timevar_push (TV_CGRAPHOPT);
   if (!quiet_flag)
     fprintf (stderr, "Performing intraprocedural optimizations\n");
@@ -1931,7 +1982,8 @@ cgraph_build_static_cdtor (char which, tree body, int priority)
   TREE_STATIC (decl) = 1;
   TREE_USED (decl) = 1;
   DECL_ARTIFICIAL (decl) = 1;
-  /* APPLE LOCAL delete DECL_IGNORED_P (decl) = 1; * Radar 3939078 */
+  /* APPLE LOCAL Radar 3939078 */
+  /* Delete DECL_IGNORED_P (decl) = 1; */
   DECL_NO_INSTRUMENT_FUNCTION_ENTRY_EXIT (decl) = 1;
   DECL_SAVED_TREE (decl) = body;
   TREE_PUBLIC (decl) = ! targetm.have_ctors_dtors;

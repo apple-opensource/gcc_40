@@ -24,6 +24,7 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "tm.h"
 #include "rtl.h"
 #include "hard-reg-set.h"
+#include "obstack.h"
 #include "basic-block.h"
 #include "cfgloop.h"
 #include "cfglayout.h"
@@ -225,11 +226,11 @@ may_unswitch_on (basic_block bb, struct loop *loop, rtx *cinsn)
       if (at != BB_END (bb))
 	return NULL_RTX;
 
-      *cinsn = BB_END (bb);
       if (!rtx_equal_p (op[0], XEXP (test, 0))
 	  || !rtx_equal_p (op[1], XEXP (test, 1)))
 	return NULL_RTX;
 
+      *cinsn = BB_END (bb);
       return test;
     }
 
@@ -268,7 +269,7 @@ unswitch_single_loop (struct loops *loops, struct loop *loop,
   basic_block *bbs;
   struct loop *nloop;
   unsigned i;
-  rtx cond, rcond = NULL_RTX, conds, rconds, acond, cinsn = NULL_RTX;
+  rtx cond, rcond = NULL_RTX, conds, rconds, acond, cinsn;
   int repeat;
   edge e;
 
@@ -323,6 +324,7 @@ unswitch_single_loop (struct loops *loops, struct loop *loop,
   do
     {
       repeat = 0;
+      cinsn = NULL_RTX;
 
       /* Find a bb to unswitch on.  */
       bbs = get_loop_body (loop);
@@ -380,7 +382,7 @@ unswitch_single_loop (struct loops *loops, struct loop *loop,
   /* Unswitch the loop on this condition.  */
   nloop = unswitch_loop (loops, loop, bbs[i], cond, cinsn);
   if (!nloop)
-    abort ();
+  abort ();
 
   /* Invoke itself on modified loops.  */
   unswitch_single_loop (loops, nloop, rconds, num + 1);

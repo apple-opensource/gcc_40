@@ -1,4 +1,4 @@
-/* Copyright (C) 2001, 2002, 2003 Free Software Foundation, Inc.
+/* Copyright (C) 2001, 2002, 2003, 2005 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -57,7 +57,6 @@ extern void _keymgr_set_and_unlock_processwide_ptr (int, void *);
 extern void _keymgr_unlock_processwide_ptr (int);
 
 struct mach_header;
-/* APPLE LOCAL 64-bit mainline */
 struct mach_header_64;
 extern char *getsectdatafromheader (struct mach_header*, const char*,
 			const char *, unsigned long *);
@@ -152,26 +151,25 @@ examine_objects (void *pc, struct dwarf_eh_bases *bases, int dont_alloc)
   for (; image != NULL; image = image->next)
     if ((image->examined_p & EXAMINED_IMAGE_MASK) == 0)
       {
-	char *fde;
+	/* APPLE LOCAL begin mainline */
+	char *fde = NULL;
 	unsigned long sz;
 
-/* APPLE LOCAL 64-bit mainline */
-#ifdef __ppc64__
-	fde = getsectdatafromheader_64 ((struct mach_header_64 *) image->mh,
-				     "__DATA", "__eh_frame", &sz);
-#else
+	/* For ppc only check whether or not we have __DATA eh frames.  */
+#ifdef __ppc__
 	fde = getsectdatafromheader (image->mh, "__DATA", "__eh_frame", &sz);
 #endif
+
 	if (fde == NULL)
 	  {
-/* APPLE LOCAL 64-bit mainline */
-#ifdef __ppc64__
+#if __LP64__
 	    fde = getsectdatafromheader_64 ((struct mach_header_64 *) image->mh,
-					 "__TEXT", "__eh_frame", &sz);
+					    "__TEXT", "__eh_frame", &sz);
 #else
 	    fde = getsectdatafromheader (image->mh, "__TEXT",
 					 "__eh_frame", &sz);
 #endif
+	    /* APPLE LOCAL end mainline */
 	    if (fde != NULL)
 	      image->examined_p |= IMAGE_IS_TEXT_MASK;
 	  }

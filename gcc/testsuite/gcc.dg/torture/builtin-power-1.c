@@ -7,7 +7,10 @@
 
 /* { dg-do link } */
 /* { dg-options "-ffast-math" } */
+/* APPLE LOCAL begin mainline 2005-09-01 3449986 */
+/* { dg-options "-ffast-math -mmacosx-version-min=10.3" { target powerpc-*-darwin* } } */
 
+/* APPLE LOCAL end mainline 2005-09-01 3449986 */
 #include "../builtins-config.h"
 
 #ifdef HAVE_C99_RUNTIME
@@ -63,7 +66,7 @@ void test(double d1, double d2, double d3,
      || FN##l(powl(ld1,ld2)) != powl(ld1,ld2/N)) \
     link_failure_##FN##_pow()
 
-  ROOT_POW(sqrt,2);
+  /*ROOT_POW(sqrt,2); Invalid. */
   /*ROOT_POW(cbrt,3); Intentionally not implemented.  */
 
   /* Test pow(pow(x,y),z) -> pow(x,y*z).  */

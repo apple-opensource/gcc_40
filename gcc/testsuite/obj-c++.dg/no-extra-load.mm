@@ -1,8 +1,9 @@
-// APPLE LOCAL file Objective-C++
+// APPLE LOCAL file mainline
 // Radar 3926484
 // { dg-do compile }
 
-#include <objc/Object.h>
+/* APPLE LOCAL radar 4894756 */
+#include "../objc/execute/Object2.h"
 #include <iostream>
 
 @interface Greeter : Object

@@ -25,7 +25,7 @@
 # Each language makefile fragment must provide the following targets:
 #
 # foo.all.build, foo.all.cross, foo.start.encap, foo.rest.encap,
-# foo.info, foo.dvi,
+# foo.info
 # foo.install-normal, foo.install-common, foo.install-info, foo.install-man,
 # foo.uninstall, foo.distdir,
 # foo.mostlyclean, foo.clean, foo.distclean, foo.extraclean,
@@ -132,6 +132,7 @@ f95.tags: force
 
 f95.info: doc/gfortran.info
 dvi:: doc/gfortran.dvi
+html:: $(htmldir)/gfortran/index.html
 
 F95_MANFILES = doc/gfortran.1
 
@@ -157,12 +158,17 @@ GFORTRAN_TEXI = \
 doc/gfortran.info: $(GFORTRAN_TEXI)
 	if [ x$(BUILD_INFO) = xinfo ]; then \
 	  rm -f doc/gfortran.info-*; \
-	  $(MAKEINFO) -I$(srcdir)/doc/include -I$(srcdir)/fortran \
-	    -o doc/gfortran.info $(srcdir)/fortran/gfortran.texi; \
+	  $(MAKEINFO) -I $(srcdir)/doc/include -I $(srcdir)/fortran \
+	    -o $@ $<; \
 	else true; fi
 
 doc/gfortran.dvi: $(GFORTRAN_TEXI)
 	$(TEXI2DVI) -I $(srcdir)/fortran -I $(abs_docdir)/include -o $@ $<
+
+$(htmldir)/gfortran/index.html: $(GFORTRAN_TEXI)
+	$(mkinstalldirs) $(@D)
+	rm -f $(@D)/*
+	$(TEXI2HTML) -I $(docdir)/include -I $(srcdir)/fortran -o $(@D) $<
 
 .INTERMEDIATE: gfortran.pod
 
@@ -199,13 +205,15 @@ f95.install-common: installdirs
 
 install-info:: $(DESTDIR)$(infodir)/gfortran.info
 
-f95.install-man: installdirs \
-	$(DESTDIR)$(man1dir)/$(GFORTRAN_INSTALL_NAME)$(man1ext)
+ # APPLE LOCAL begin mainline 4.1 2005-06-16
+f95.install-man: $(DESTDIR)$(man1dir)/$(GFORTRAN_INSTALL_NAME)$(man1ext)
 
-$(DESTDIR)$(man1dir)/$(GFORTRAN_INSTALL_NAME)$(man1ext): doc/gfortran.1
+$(DESTDIR)$(man1dir)/$(GFORTRAN_INSTALL_NAME)$(man1ext): doc/gfortran.1 \
+		installdirs
 	-rm -f $@
 	-$(INSTALL_DATA) $< $@
 	-chmod a-x $@
+ # APPLE LOCAL end mainline 4.1 2005-06-16
 
 f95.uninstall:
 	if $(SHELL) -c 'install-info --version | sed 1q | fgrep -s -v -i debian' >/dev/null 2>&1; then \

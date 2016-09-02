@@ -1,6 +1,6 @@
 /* Definitions for c-common.c.
    Copyright (C) 1987, 1993, 1994, 1995, 1997, 1998,
-   1999, 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+   1999, 2000, 2001, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -25,26 +25,6 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "splay-tree.h"
 #include "cpplib.h"
 #include "ggc.h"
-
-/* APPLE LOCAL begin CW asm blocks */
-/* We use a small state machine to inform the lexer when to start
-   returning tokens marking the beginning of each asm line.  */
-enum cw_asm_states {
-  /* Normal code.  */
-  cw_asm_none,
-  /* '{' of asm block seen, decls may appear.  */
-  cw_asm_decls,
-  /* No more decls, in asm block proper, '}' not seen yet.  */
-  cw_asm_asm
-};
-
-extern enum cw_asm_states cw_asm_state;
-extern int cw_asm_in_decl;
-extern int cw_asm_block;
-extern int cw_asm_at_bol;
-extern int cw_asm_in_operands;
-extern int cw_asm_labelno;
-/* APPLE LOCAL end CW asm blocks */
 
 /* Usage of TREE_LANG_FLAG_?:
    0: TREE_NEGATED_INT (in INTEGER_CST).
@@ -76,7 +56,6 @@ enum rid
 
   /* C extensions */
   RID_COMPLEX, RID_THREAD,
-
   /* APPLE LOCAL private extern */
   RID_PRIVATE_EXTERN,
 
@@ -117,15 +96,34 @@ enum rid
   /* Objective-C */
   RID_AT_ENCODE,   RID_AT_END,
   RID_AT_CLASS,    RID_AT_ALIAS,     RID_AT_DEFS,
-  RID_AT_PRIVATE,  RID_AT_PROTECTED, RID_AT_PUBLIC,
+  /* APPLE LOCAL radar 4564694 */
+  RID_AT_PACKAGE,  RID_AT_PRIVATE,  RID_AT_PROTECTED, RID_AT_PUBLIC,
   RID_AT_PROTOCOL, RID_AT_SELECTOR,  
   RID_AT_THROW,	   RID_AT_TRY,       RID_AT_CATCH,
   RID_AT_FINALLY,  RID_AT_SYNCHRONIZED,
   RID_AT_INTERFACE,
+  /* APPLE LOCAL C* language */
+  RID_AT_OPTIONAL, RID_AT_REQUIRED,
+  /* APPLE LOCAL C* property (Radar 4436866) */
+  RID_AT_PROPERTY,
+  /* APPLE LOCAL begin objc new property */
+  RID_AT_SYNTHESIZE,
+  RID_AT_DYNAMIC,
+  /* APPLE LOCAL end objc new property */
   RID_AT_IMPLEMENTATION,
+  /* APPLE LOCAL C* property (Radar 4436866, 4591909, 4621020) */
+  RID_READONLY, RID_DYNAMIC, RID_GETTER, RID_SETTER, RID_WEAK, RID_IVAR,
+  /* APPLE LOCAL objc new property */
+  RID_READWRITE, RID_ASSIGN, RID_RETAIN, RID_COPY,
+  /* APPLE LOCAL radar 4947014 - objc atomic property */
+  RID_NONATOMIC,
 
   RID_MAX,
 
+  /* APPLE LOCAL begin C* property (Radar 4436866) */
+  RID_FIRST_PATTR = RID_READONLY,
+  RID_LAST_PATTR = RID_IVAR,
+  /* APPLE LOCAL end C* property (Radar 4436866) */
   RID_FIRST_MODIFIER = RID_STATIC,
   RID_LAST_MODIFIER = RID_ONEWAY,
 
@@ -135,9 +133,36 @@ enum rid
   RID_LAST_PQ = RID_ONEWAY
 };
 
+/* APPLE LOCAL begin objc new property */
+#define OBJC_IS_NEW_PATTR_KEYWORD(rid) \
+  (((unsigned int) (rid) == RID_SETTER    || \
+    (unsigned int) (rid) == RID_GETTER    || \
+    (unsigned int) (rid) == RID_READONLY  || \
+    (unsigned int) (rid) == RID_READWRITE || \
+    (unsigned int) (rid) == RID_ASSIGN    || \
+    (unsigned int) (rid) == RID_RETAIN    || \
+    /* APPLE LOCAL begin radar 4947014 - objc atomic property */  \
+    (unsigned int) (rid) == RID_COPY	  || \
+    (unsigned int) (rid) == RID_NONATOMIC))
+    /* APPLE LOCAL end radar 4947014 - objc atomic property */  \
+/* APPLE LOCAL end objc new property */
+
+/* APPLE LOCAL begin C* property (Radar 4436866) */
+#define OBJC_IS_PATTR_KEYWORD(rid) \
+  ((unsigned int) (rid) >= (unsigned int) RID_FIRST_PATTR && \
+  (unsigned int) (rid) <= (unsigned int) RID_LAST_PATTR)
+/* APPLE LOCAL end C* property (Radar 4436866) */
+
 #define OBJC_IS_AT_KEYWORD(rid) \
   ((unsigned int) (rid) >= (unsigned int) RID_FIRST_AT && \
    (unsigned int) (rid) <= (unsigned int) RID_LAST_AT)
+
+/* APPLE LOCAL begin objc new property */
+#define OBJC_IS_NEW_AT_KEYWORD(rid) \
+  (((OBJC_IS_AT_KEYWORD(rid) || \
+    (unsigned int) (rid) == RID_AT_SYNTHESIZE || \
+    (unsigned int) (rid) == RID_DYNAMIC)))
+/* APPLE LOCAL end objc new property */
 
 #define OBJC_IS_PQ_KEYWORD(rid) \
   ((unsigned int) (rid) >= (unsigned int) RID_FIRST_PQ && \
@@ -185,6 +210,8 @@ enum c_tree_index
     
     CTI_VOID_ZERO,
 
+    CTI_NULL,
+
     CTI_MAX
 };
 
@@ -231,6 +258,9 @@ struct c_common_identifier GTY(())
 /* A node for `((void) 0)'.  */
 #define void_zero_node                  c_global_trees[CTI_VOID_ZERO]
 
+/* The node for C++ `__null'.  */
+#define null_node                       c_global_trees[CTI_NULL]
+
 extern GTY(()) tree c_global_trees[CTI_MAX];
 
 /* In a RECORD_TYPE, a sorted array of the fields of the type, not a
@@ -268,7 +298,7 @@ extern c_language_kind c_language;
 /* Information about a statement tree.  */
 
 struct stmt_tree_s GTY(()) {
-  /* The current statment list being collected.  */
+  /* The current statement list being collected.  */
   tree x_cur_stmt_list;
 
   /* In C++, Nonzero if we should treat statements as full
@@ -299,15 +329,13 @@ struct c_language_function GTY(()) {
   struct stmt_tree_s x_stmt_tree;
 };
 
-/* When building a statement-tree, this is the current statment list
+/* When building a statement-tree, this is the current statement list
    being collected.  It's TREE_CHAIN is a back-pointer to the previous
-   statment list.  */
+   statement list.  */
 
 #define cur_stmt_list (current_stmt_tree ()->x_cur_stmt_list)
 
 /* Language-specific hooks.  */
-
-extern void (*lang_expand_function_end) (void);
 
 /* Callback that determines if it's ok for a function to have no
    noreturn attribute.  */
@@ -326,7 +354,6 @@ extern tree pop_stmt_list (tree);
 extern tree add_stmt (tree);
 extern void push_cleanup (tree, tree, bool);
 
-extern tree walk_stmt_tree (tree *, walk_tree_fn, void *);
 extern int c_expand_decl (tree);
 
 extern int field_decl_cmp (const void *, const void *);
@@ -423,6 +450,10 @@ extern int flag_short_wchar;
 extern int flag_lvalue_cast_assign;
 /* APPLE LOCAL end lvalue cast */
 
+/* APPLE LOCAL begin mainline rewrite c.opt */
+extern int flag_gnu89_inline;
+/* APPLE LOCAL end mainline rewrite c.opt */
+
 /* Nonzero means allow Microsoft extensions without warnings or errors.  */
 extern int flag_ms_extensions;
 
@@ -430,8 +461,9 @@ extern int flag_ms_extensions;
 
 extern int flag_no_asm;
 
-/* APPLE LOCAL CW asm blocks */
-extern int flag_cw_asm_blocks;
+/* APPLE LOCAL begin CW asm blocks */
+#include "config/asm.h"
+/* APPLE LOCAL end CW asm blocks */
 
 /* Nonzero means give string constants the type `const char *', as mandated
    by the standard.  */
@@ -441,7 +473,6 @@ extern int flag_const_strings;
 /* Nonzero means to treat bitfields as signed unless they say `unsigned'.  */
 
 extern int flag_signed_bitfields;
-extern int explicit_flag_signed_bitfields;
 
 /* Nonzero means warn about deprecated conversion from string constant to
    `char *'.  */
@@ -457,12 +488,12 @@ extern int warn_unknown_pragmas; /* Tri state variable.  */
 
 extern int warn_format;
 
-/* BEGIN APPLE LOCAL disable_typechecking_for_spec_flag */
+/* APPLE LOCAL begin disable_typechecking_for_spec_flag */
 /* This makes type conflicts a warning, instead of an error,
    to work around some problems with SPEC.  */
 
 extern int disable_typechecking_for_spec_flag;
-/* END APPLE LOCAL disable_typechecking_for_spec_flag */
+/* APPLE LOCAL end disable_typechecking_for_spec_flag */
 
 /* C/ObjC language option variables.  */
 
@@ -501,12 +532,17 @@ extern int flag_gen_declaration;
 
 extern int flag_next_runtime;
 
-/* APPLE LOCAL begin ObjC C++ ivars */
+/* APPLE LOCAL begin mainline */
 /* Generate special '- .cxx_construct' and '- .cxx_destruct' methods
    to initialize any non-POD ivars in ObjC++ classes.  */
 
 extern int flag_objc_call_cxx_cdtors;
-/* APPLE LOCAL end ObjC C++ ivars */
+/* APPLE LOCAL end mainline */
+/* APPLE LOCAL begin radar 2848255 */
+extern int flag_objc_zerocost_exceptions;
+bool objc2_valid_objc_catch_type (tree);
+tree objc2_build_throw_call (tree);
+/* APPLE LOCAL end radar 2848255 */
 
 /* Tells the compiler that this is a special run.  Do not perform any
    compiling, instead we are to test some platform dependent features
@@ -514,6 +550,8 @@ extern int flag_objc_call_cxx_cdtors;
 
 extern int print_struct_values;
 
+/* APPLE LOCAL radar 5082000 */
+extern int print_objc_ivar_layout; 
 /* ???.  Undocumented.  */
 
 extern const char *constant_string_class_name;
@@ -608,6 +646,13 @@ extern int flag_working_directory;
 
 extern int flag_use_cxa_atexit;
 
+/* APPLE LOCAL begin mainline 2006-02-24 4086777 */
+/* Nonzero to use __cxa_get_exception_ptr in the C++ exception-handling
+   logic.  */
+
+extern int flag_use_cxa_get_exception_ptr;
+
+/* APPLE LOCAL end mainline 2006-02-24 4086777 */
 /* Nonzero means make the default pedwarns warnings instead of errors.
    The value of this flag is ignored if -pedantic is specified.  */
 
@@ -619,17 +664,6 @@ extern int flag_permissive;
    assertions and optimize accordingly, but not check them.  */
 
 extern int flag_enforce_eh_specs;
-
-/* APPLE LOCAL KEXT */
-extern int flag_apple_kext;
-
-/* APPLE LOCAL begin structor thunks */
-/* Nonzero if we prefer to clone con/de/structors.
-   Alternative is to gen multiple tiny thunk-esque things that
-   call/jump to a unified con/de/structor.  This is a classic
-   size/speed tradeoff.  */
-extern int flag_clone_structors;
-/* APPLE LOCAL end structor thunks */
 
 /* APPLE LOCAL begin private extern  Radar 2872481 --ilr */
 /* Nonzero if -fpreprocessed specified.  This is needed by init_reswords()
@@ -648,6 +682,12 @@ extern int flag_threadsafe_statics;
 /* Nonzero means warn about implicit declarations.  */
 
 extern int warn_implicit;
+
+/* Warn about using __null (as NULL in C++) as sentinel.  For code compiled
+   with GCC this doesn't matter as __null is guaranteed to have the right
+   size.  */
+
+extern int warn_strict_null_sentinel;
 
 /* Maximum template instantiation depth.  This limit is rather
    arbitrary, but it exists to limit the time it takes to notice
@@ -722,6 +762,10 @@ extern void binary_op_error (enum tree_code);
 extern tree fix_string_type (tree);
 struct varray_head_tag;
 extern void constant_expression_warning (tree);
+/* APPLE LOCAL ARM 4683958 mainline */
+extern void strict_aliasing_warning(tree, tree, tree);
+/* APPLE LOCAL mainline */
+extern void warnings_for_convert_and_check (tree, tree, tree);
 extern tree convert_and_check (tree, tree);
 extern void overflow_warning (tree);
 extern void unsigned_conversion_warning (tree, tree);
@@ -745,9 +789,7 @@ extern tree c_build_qualified_type (tree, int);
    frontends.  */
 extern void c_common_nodes_and_builtins (void);
 
-/* APPLE LOCAL begin mainline radar 3845716 */
 extern void set_builtin_user_assembler_name (tree decl, const char *asmspec);
-/* APPLE LOCAL end mainline   radar 3845716 */
 
 extern void disable_builtin_function (const char *);
 
@@ -764,6 +806,7 @@ extern bool c_promoting_integer_type_p (tree);
 extern int self_promoting_args_p (tree);
 extern tree strip_array_types (tree);
 extern tree strip_pointer_operator (tree);
+extern HOST_WIDE_INT c_common_to_target_charset (HOST_WIDE_INT);
 
 /* APPLE LOCAL begin IMA built-in decl merging fix (radar 3645899) */
 extern bool builtin_function_disabled_p (const char *);
@@ -773,6 +816,7 @@ extern bool builtin_function_disabled_p (const char *);
 extern void c_parse_file (void);
 /* This is misnamed, it actually performs end-of-compilation processing.  */
 extern void finish_file	(void);
+
 
 /* These macros provide convenient access to the various _STMT nodes.  */
 
@@ -801,6 +845,13 @@ extern void finish_file	(void);
 #define DO_COND(NODE)           TREE_OPERAND (DO_STMT_CHECK (NODE), 0)
 #define DO_BODY(NODE)           TREE_OPERAND (DO_STMT_CHECK (NODE), 1)
 
+/* APPLE LOCAL begin C* language */
+/* Used as a flag to indicate synthesized inner do-while loop of a 
+   foreach statement.  Used for generation of break/continue statement 
+   of the loop. */
+#define DO_FOREACH(NODE)           TREE_OPERAND (DO_STMT_CHECK (NODE), 2)
+/* APPLE LOCAL end C* language */
+
 /* EXPR_STMT accessor. This gives the expression associated with an
    expression statement.  */
 #define EXPR_STMT_EXPR(NODE)    TREE_OPERAND (EXPR_STMT_CHECK (NODE), 0)
@@ -813,7 +864,9 @@ extern void finish_file	(void);
 #define FOR_EXPR(NODE)          TREE_OPERAND (FOR_STMT_CHECK (NODE), 2)
 #define FOR_BODY(NODE)          TREE_OPERAND (FOR_STMT_CHECK (NODE), 3)
 
-#define SWITCH_TYPE(NODE)	TREE_OPERAND (SWITCH_STMT_CHECK (NODE), 2)
+#define SWITCH_STMT_COND(NODE)	TREE_OPERAND (SWITCH_STMT_CHECK (NODE), 0)
+#define SWITCH_STMT_BODY(NODE)	TREE_OPERAND (SWITCH_STMT_CHECK (NODE), 1)
+#define SWITCH_STMT_TYPE(NODE)	TREE_OPERAND (SWITCH_STMT_CHECK (NODE), 2)
 
 /* STMT_EXPR accessor.  */
 #define STMT_EXPR_STMT(NODE)    TREE_OPERAND (STMT_EXPR_CHECK (NODE), 0)
@@ -917,8 +970,6 @@ extern rtx c_expand_expr (tree, rtx, enum machine_mode, int, rtx *);
 
 extern tree c_staticp (tree);
 
-extern int c_common_unsafe_for_reeval (tree);
-
 extern void init_c_lex (void);
 
 extern void c_cpp_builtins (cpp_reader *);
@@ -954,6 +1005,22 @@ extern void verify_sequence_points (tree);
 
 extern tree fold_offsetof (tree);
 
+/* Places where an lvalue, or modifiable lvalue, may be required.
+   Used to select diagnostic messages in lvalue_or_else and
+   readonly_error.  */
+enum lvalue_use {
+  lv_assign,
+  lv_increment,
+  lv_decrement,
+  lv_addressof,
+  lv_asm
+};
+
+/* APPLE LOCAL non lvalue assign */
+extern int lvalue_or_else (tree *, enum lvalue_use);
+
+extern int complete_array_type (tree *, tree, bool);
+
 /* In c-gimplify.c  */
 extern void c_genericize (tree);
 extern int c_gimplify_expr (tree *, tree *, tree *);
@@ -967,7 +1034,13 @@ extern void c_common_read_pch (cpp_reader *pfile, const char *name, int fd,
 extern void c_common_write_pch (void);
 extern void c_common_no_more_pch (void);
 extern void c_common_pch_pragma (cpp_reader *pfile);
+/* APPLE LOCAL begin mainline 4.1 2005-06-17 3988498 */
+extern void c_common_print_pch_checksum (FILE *f);
 
+/* In *-checksum.c */
+extern const unsigned char executable_checksum[16];
+
+/* APPLE LOCAL end mainline 4.1 2005-06-17 3988498 */
 extern void builtin_define_with_value (const char *, const char *, int);
 extern void c_stddef_cpp_builtins (void);
 extern void fe_file_change (const struct line_map *);
@@ -980,8 +1053,28 @@ extern void c_parse_error (const char *, enum cpp_ttype, tree);
 extern tree objc_is_class_name (tree);
 extern tree objc_is_object_ptr (tree);
 extern void objc_check_decl (tree);
+/* APPLE LOCAL radar 4281748 */
+extern void objc_check_global_decl (tree);
 extern int objc_is_reserved_word (tree);
-extern int objc_comptypes (tree, tree, int);
+/* APPLE LOCAL 4154928 */
+extern tree objc_common_type (tree, tree);
+/* APPLE LOCAL 4330422 */
+extern tree objc_non_volatilized_type (tree);
+/* APPLE LOCAL radar 4697411 */
+extern void objc_volatilize_component_ref (tree, tree);
+/* APPLE LOCAL begin mainline */
+/* Prototype for 'objc_comptypes' removed.  */
+extern bool objc_compare_types (tree, tree, int, tree);
+/* APPLE LOCAL radar 4229905 */
+extern bool objc_have_common_type (tree, tree, int, tree);
+/* APPLE LOCAL radar 4133425 */
+extern bool objc_diagnose_private_ivar (tree);
+/* APPLE LOCAL radar 4507230 */
+bool objc_type_valid_for_messaging (tree);
+extern void objc_volatilize_decl (tree);
+extern bool objc_type_quals_match (tree, tree);
+extern tree objc_rewrite_function_call (tree, tree);
+/* APPLE LOCAL end mainline */
 extern tree objc_message_selector (void);
 extern tree objc_lookup_ivar (tree, tree);
 extern void objc_clear_super_receiver (void);
@@ -999,36 +1092,87 @@ extern tree objc_build_string_object (tree);
 extern tree objc_get_protocol_qualified_type (tree, tree);
 extern tree objc_get_class_reference (tree);
 extern tree objc_get_class_ivars (tree);
-extern void objc_start_class_interface (tree, tree, tree);
+/* APPLE LOCAL begin radar 4291785 */
+extern tree objc_get_interface_ivars (tree);
+extern void objc_detect_field_duplicates (tree);
+/* APPLE LOCAL end radar 4291785 */
+/* APPLE LOCAL radar 4548636 */
+extern void objc_start_class_interface (tree, tree, tree, tree);
 extern void objc_start_category_interface (tree, tree, tree);
 extern void objc_start_protocol (tree, tree);
 extern void objc_continue_interface (void);
 extern void objc_finish_interface (void);
 extern void objc_start_class_implementation (tree, tree);
 extern void objc_start_category_implementation (tree, tree);
+/* APPLE LOCAL radar 4533974 - ObjC new protocol */
+extern void objc_protocol_implementation (tree);
+/* APPLE LOCAL radar 4592503 */
+extern void objc_checkon_weak_attribute (tree);
 extern void objc_continue_implementation (void);
 extern void objc_finish_implementation (void);
 extern void objc_set_visibility (int);
 extern void objc_set_method_type (enum tree_code);
 extern tree objc_build_method_signature (tree, tree, tree);
-extern void objc_add_method_declaration (tree);
-extern void objc_start_method_definition (tree);
+/* APPLE LOCAL begin radar 3803157 - objc attribute */
+extern bool objc_method_decl (enum tree_code);
+extern void objc_add_method_declaration (tree, tree);
+extern void objc_start_method_definition (tree, tree);
+/* APPLE LOCAL end radar 3803157 - objc attribute */
 extern void objc_finish_method_definition (tree);
 extern void objc_add_instance_variable (tree);
 extern tree objc_build_keyword_decl (tree, tree, tree);
 extern tree objc_build_throw_stmt (tree);
 extern void objc_begin_try_stmt (location_t, tree);
-/* APPLE LOCAL Objective-C++ */
+/* APPLE LOCAL LOCAL mainline */
 extern tree objc_finish_try_stmt (void);
 extern void objc_begin_catch_clause (tree);
 extern void objc_finish_catch_clause (void);
 extern void objc_build_finally_clause (location_t, tree);
-/* APPLE LOCAL Objective-C++ */
+/* APPLE LOCAL mainline */
 extern tree objc_build_synchronized (location_t, tree, tree);
 extern int objc_static_init_needed_p (void);
 extern tree objc_generate_static_init_call (tree);
-/* APPLE LOCAL ObjC GC */
+/* APPLE LOCAL mainline */
 extern tree objc_generate_write_barrier (tree, enum tree_code, tree);
+/* APPLE LOCAL begin radar 5276085 */
+extern void objc_weak_reference_expr (tree*);
+extern tree objc_build_weak_reference_tree (tree);
+/* APPLE LOCAL end radar 5276085 */
+/* APPLE LOCAL begin C* language */
+extern void objc_set_method_opt (int);
+
+void objc_finish_foreach_loop (location_t, tree, tree, tree, tree);
+tree objc_build_component_ref (tree, tree);
+tree objc_build_foreach_components (tree, tree*, tree*, tree*, 
+				    tree*, tree*, tree*);
+/* APPLE LOCAL end C* language */
+/* APPLE LOCAL begin C* property (Radar 4436866) */
+void objc_set_property_attr (int, tree);
+void objc_add_property_variable (tree);
+tree objc_build_getter_call (tree, tree);
+tree objc_build_setter_call (tree, tree);
+/* APPLE LOCAL end C* property (Radar 4436866) */
+/* APPLE LOCAL radar 4712269 */
+tree objc_build_incr_decr_setter_call (enum tree_code, tree, tree);
+/* APPLE LOCAL objc new property */
+void objc_declare_property_impl (int, tree);
+
+/* APPLE LOCAL ObjC new abi */
+extern tree objc_v2_build_ivar_ref (tree datum, tree component);
+
+/* APPLE LOCAL C* warnings to easy porting to new abi */
+void diagnose_selector_cast (tree cast_type, tree sel_exp);
+
+/* APPLE LOCAL begin radar 4441049 */
+tree objc_v2_component_ref_field_offset (tree);
+tree objc_v2_bitfield_ivar_bitpos (tree);
+/* APPLE LOCAL end radar 4441049 */
+
+/* APPLE LOCAL radar 4985544 */
+bool objc_check_format_nsstring (tree, unsigned HOST_WIDE_INT, bool *);
+
+/* APPLE LOCAL radar 2996215 */
+tree objc_create_init_utf16_var (const unsigned char *, size_t, size_t *);
 
 /* The following are provided by the C and C++ front-ends, and called by
    ObjC/ObjC++.  */
@@ -1040,20 +1184,6 @@ extern void init_pp_output (FILE *);
 extern void preprocess_file (cpp_reader *);
 extern void pp_file_change (const struct line_map *);
 extern void pp_dir_change (cpp_reader *, const char *);
-
-/* APPLE LOCAL begin CW asm blocks */
-extern tree cw_asm_stmt (tree, tree, int);
-extern tree cw_asm_build_register_offset (tree, tree);
-extern tree cw_asm_label (tree, int);
-extern tree prepend_char_identifier (tree, char);
-extern void clear_cw_asm_labels (void);
-extern tree cw_asm_reg_name (tree);
-extern tree get_cw_asm_label (tree);
-extern tree cw_asm_entry (tree, tree, tree);
-extern int cw_asm_typename_or_reserved (tree);
-extern tree cw_asm_c_build_component_ref (tree, tree);
-extern tree cw_get_identifier (tree, const char *);
-/* APPLE LOCAL end CW asm blocks */
 
 /* APPLE LOCAL begin AltiVec */
 /* The following function will convert expressions into

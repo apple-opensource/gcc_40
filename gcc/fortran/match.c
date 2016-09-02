@@ -1,5 +1,5 @@
 /* Matching subroutines in all sizes, shapes and colors.
-   Copyright (C) 2000, 2001, 2002, 2003, 2004 Free Software Foundation,
+   Copyright (C) 2000, 2001, 2002, 2003, 2004, 2005 Free Software Foundation,
    Inc.
    Contributed by Andy Vaught
 
@@ -24,10 +24,6 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "config.h"
 #include "system.h"
 #include "flags.h"
-
-#include <stdarg.h>
-#include <string.h>
-
 #include "gfortran.h"
 #include "match.h"
 #include "parse.h"
@@ -270,7 +266,8 @@ gfc_match_label (void)
     }
 
   if (gfc_new_block->attr.flavor != FL_LABEL
-      && gfc_add_flavor (&gfc_new_block->attr, FL_LABEL, NULL) == FAILURE)
+      && gfc_add_flavor (&gfc_new_block->attr, FL_LABEL,
+			 gfc_new_block->name, NULL) == FAILURE)
     return MATCH_ERROR;
 
   for (p = gfc_state_stack; p; p = p->previous)
@@ -810,7 +807,7 @@ gfc_match_program (void)
   if (m == MATCH_ERROR)
     return m;
 
-  if (gfc_add_flavor (&sym->attr, FL_PROGRAM, NULL) == FAILURE)
+  if (gfc_add_flavor (&sym->attr, FL_PROGRAM, sym->name, NULL) == FAILURE)
     return MATCH_ERROR;
 
   gfc_new_block = sym;
@@ -902,6 +899,43 @@ cleanup:
 }
 
 
+/* We try to match an easy arithmetic IF statement. This only happens
+   when just after having encountered a simple IF statement. This code
+   is really duplicate with parts of the gfc_match_if code, but this is
+   *much* easier.  */
+static match
+match_arithmetic_if (void)
+{
+  gfc_st_label *l1, *l2, *l3;
+  gfc_expr *expr;
+  match m;
+
+  m = gfc_match (" ( %e ) %l , %l , %l%t", &expr, &l1, &l2, &l3);
+  if (m != MATCH_YES)
+    return m;
+
+  if (gfc_reference_st_label (l1, ST_LABEL_TARGET) == FAILURE
+      || gfc_reference_st_label (l2, ST_LABEL_TARGET) == FAILURE
+      || gfc_reference_st_label (l3, ST_LABEL_TARGET) == FAILURE)
+    {
+      gfc_free_expr (expr);
+      return MATCH_ERROR;
+    }
+
+  if (gfc_notify_std (GFC_STD_F95_DEL,
+		      "Obsolete: arithmetic IF statement at %C") == FAILURE)
+    return MATCH_ERROR;
+
+  new_st.op = EXEC_ARITHMETIC_IF;
+  new_st.expr = expr;
+  new_st.label = l1;
+  new_st.label2 = l2;
+  new_st.label3 = l3;
+
+  return MATCH_YES;
+}
+
+
 /* The IF statement is a bit of a pain.  First of all, there are three
    forms of it, the simple IF, the IF that starts a block and the
    arithmetic IF.
@@ -963,6 +997,11 @@ gfc_match_if (gfc_statement * if_type)
 	  gfc_free_expr (expr);
 	  return MATCH_ERROR;
 	}
+      
+      if (gfc_notify_std (GFC_STD_F95_DEL,
+  		          "Obsolete: arithmetic IF statement at %C")
+	  == FAILURE)
+        return MATCH_ERROR;
 
       new_st.op = EXEC_ARITHMETIC_IF;
       new_st.expr = expr;
@@ -974,7 +1013,7 @@ gfc_match_if (gfc_statement * if_type)
       return MATCH_YES;
     }
 
-  if (gfc_match (" then %t") == MATCH_YES)
+  if (gfc_match (" then%t") == MATCH_YES)
     {
       new_st.op = EXEC_IF;
       new_st.expr = expr;
@@ -1039,6 +1078,7 @@ gfc_match_if (gfc_statement * if_type)
     match ("exit", gfc_match_exit, ST_EXIT)
     match ("forall", match_simple_forall, ST_FORALL)
     match ("go to", gfc_match_goto, ST_GOTO)
+    match ("if", match_arithmetic_if, ST_ARITHMETIC_IF)
     match ("inquire", gfc_match_inquire, ST_INQUIRE)
     match ("nullify", gfc_match_nullify, ST_NULLIFY)
     match ("open", gfc_match_open, ST_OPEN)
@@ -1529,7 +1569,6 @@ gfc_match_goto (void)
 	  == FAILURE)
 	return MATCH_ERROR;
 
-      expr->symtree->n.sym->attr.assign = 1;
       new_st.op = EXEC_GOTO;
       new_st.expr = expr;
 
@@ -1822,7 +1861,7 @@ gfc_match_nullify (void)
       tail->expr = p;
       tail->expr2 = e;
 
-      if (gfc_match_char (')') == MATCH_YES)
+      if (gfc_match (" )%t") == MATCH_YES)
 	break;
       if (gfc_match_char (',') != MATCH_YES)
 	goto syntax;
@@ -1944,12 +1983,7 @@ gfc_match_return (void)
   gfc_expr *e;
   match m;
   gfc_compile_state s;
-
-  gfc_enclosing_unit (&s);
-  if (s == COMP_PROGRAM
-      && gfc_notify_std (GFC_STD_GNU, "Extension: RETURN statement in "
-			 "main program at %C") == FAILURE)
-      return MATCH_ERROR;
+  int c;
 
   e = NULL;
   if (gfc_match_eos () == MATCH_YES)
@@ -1962,7 +1996,18 @@ gfc_match_return (void)
       goto cleanup;
     }
 
-  m = gfc_match ("% %e%t", &e);
+  if (gfc_current_form == FORM_FREE)
+    {
+      /* The following are valid, so we can't require a blank after the
+        RETURN keyword:
+          return+1
+          return(1)  */
+      c = gfc_peek_char ();
+      if (ISALPHA (c) || ISDIGIT (c))
+       return MATCH_NO;
+    }
+
+  m = gfc_match (" %e%t", &e);
   if (m == MATCH_YES)
     goto done;
   if (m == MATCH_ERROR)
@@ -1975,6 +2020,12 @@ cleanup:
   return MATCH_ERROR;
 
 done:
+  gfc_enclosing_unit (&s);
+  if (s == COMP_PROGRAM
+      && gfc_notify_std (GFC_STD_GNU, "Extension: RETURN statement in "
+                        "main program at %C") == FAILURE)
+      return MATCH_ERROR;
+
   new_st.op = EXEC_RETURN;
   new_st.expr = e;
 
@@ -1984,6 +2035,12 @@ done:
 
 /* Match a CALL statement.  The tricky part here are possible
    alternate return specifiers.  We handle these by having all
+  gfc_enclosing_unit (&s);
+  if (s == COMP_PROGRAM
+      && gfc_notify_std (GFC_STD_GNU, "Extension: RETURN statement in "
+                        "main program at %C") == FAILURE)
+      return MATCH_ERROR;
+
    "subroutines" actually return an integer via a register that gives
    the return number.  If the call specifies alternate returns, we
    generate code for a SELECT statement whose case clauses contain
@@ -2017,7 +2074,7 @@ gfc_match_call (void)
 
   if (!sym->attr.generic
       && !sym->attr.subroutine
-      && gfc_add_subroutine (&sym->attr, NULL) == FAILURE)
+      && gfc_add_subroutine (&sym->attr, sym->name, NULL) == FAILURE)
     return MATCH_ERROR;
 
   if (gfc_match_eos () != MATCH_YES)
@@ -2241,7 +2298,7 @@ gfc_match_common (void)
 	      goto cleanup;
 	    }
 
-	  if (gfc_add_in_common (&sym->attr, NULL) == FAILURE) 
+	  if (gfc_add_in_common (&sym->attr, sym->name, NULL) == FAILURE) 
 	    goto cleanup;
 
 	  if (sym->value != NULL
@@ -2256,7 +2313,7 @@ gfc_match_common (void)
 	      goto cleanup;
 	    }
 
-	  if (gfc_add_in_common (&sym->attr, NULL) == FAILURE)
+	  if (gfc_add_in_common (&sym->attr, sym->name, NULL) == FAILURE)
 	    goto cleanup;
 
 	  /* Derived type names must have the SEQUENCE attribute.  */
@@ -2291,7 +2348,7 @@ gfc_match_common (void)
 		  goto cleanup;
 		}
 
-	      if (gfc_add_dimension (&sym->attr, NULL) == FAILURE)
+	      if (gfc_add_dimension (&sym->attr, sym->name, NULL) == FAILURE)
 		goto cleanup;
 
 	      if (sym->attr.pointer)
@@ -2306,12 +2363,14 @@ gfc_match_common (void)
 	      as = NULL;
 	    }
 
+	  gfc_gobble_whitespace ();
 	  if (gfc_match_eos () == MATCH_YES)
 	    goto done;
 	  if (gfc_peek_char () == '/')
 	    break;
 	  if (gfc_match_char (',') != MATCH_YES)
 	    goto syntax;
+	  gfc_gobble_whitespace ();
 	  if (gfc_peek_char () == '/')
 	    break;
 	}
@@ -2355,7 +2414,7 @@ gfc_match_block_data (void)
   if (gfc_get_symbol (name, NULL, &sym))
     return MATCH_ERROR;
 
-  if (gfc_add_flavor (&sym->attr, FL_BLOCK_DATA, NULL) == FAILURE)
+  if (gfc_add_flavor (&sym->attr, FL_BLOCK_DATA, sym->name, NULL) == FAILURE)
     return MATCH_ERROR;
 
   gfc_new_block = sym;
@@ -2405,7 +2464,8 @@ gfc_match_namelist (void)
 	}
 
       if (group_name->attr.flavor != FL_NAMELIST
-	  && gfc_add_flavor (&group_name->attr, FL_NAMELIST, NULL) == FAILURE)
+	  && gfc_add_flavor (&group_name->attr, FL_NAMELIST,
+			     group_name->name, NULL) == FAILURE)
 	return MATCH_ERROR;
 
       for (;;)
@@ -2417,11 +2477,8 @@ gfc_match_namelist (void)
 	    goto error;
 
 	  if (sym->attr.in_namelist == 0
-	      && gfc_add_in_namelist (&sym->attr, NULL) == FAILURE)
+	      && gfc_add_in_namelist (&sym->attr, sym->name, NULL) == FAILURE)
 	    goto error;
-
-	  /* TODO: worry about PRIVATE members of a PUBLIC namelist
-             group.  */
 
 	  nl = gfc_get_namelist ();
 	  nl->sym = sym;
@@ -2476,7 +2533,8 @@ gfc_match_module (void)
   if (m != MATCH_YES)
     return m;
 
-  if (gfc_add_flavor (&gfc_new_block->attr, FL_MODULE, NULL) == FAILURE)
+  if (gfc_add_flavor (&gfc_new_block->attr, FL_MODULE,
+		      gfc_new_block->name, NULL) == FAILURE)
     return MATCH_ERROR;
 
   return MATCH_YES;
@@ -2592,7 +2650,8 @@ gfc_match_st_function (void)
 
   gfc_push_error (&old_error);
 
-  if (gfc_add_procedure (&sym->attr, PROC_ST_FUNCTION, NULL) == FAILURE)
+  if (gfc_add_procedure (&sym->attr, PROC_ST_FUNCTION,
+			 sym->name, NULL) == FAILURE)
     goto undo_error;
 
   if (gfc_match_formal_arglist (sym, 1, 0) != MATCH_YES)
@@ -2673,7 +2732,7 @@ match_case_selector (gfc_case ** cp)
 	goto need_expr;
 
       /* If we're not looking at a ':' now, make a range out of a single
-	 target.  Else get the upper bound for the case range. */
+	 target.  Else get the upper bound for the case range.  */
       if (gfc_match_char (':') != MATCH_YES)
 	c->high = c->low;
       else
@@ -3031,9 +3090,7 @@ match_forall_iterator (gfc_forall_iterator ** result)
     }
 
   m = gfc_match_expr (&iter->start);
-  if (m == MATCH_NO)
-    goto syntax;
-  if (m == MATCH_ERROR)
+  if (m != MATCH_YES)
     goto cleanup;
 
   if (gfc_match_char (':') != MATCH_YES)

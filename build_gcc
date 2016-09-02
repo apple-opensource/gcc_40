@@ -6,7 +6,9 @@ set -x
 # -arch arguments are different than configure arguments. We need to
 # translate them.
 
-TRANSLATE_ARCH="sed -e s/ppc/powerpc/ -e s/i386/i686/"
+TRANSLATE_ARCH="sed -e s/ppc/powerpc/ -e s/i386/i686/ -e s/ppc64/powerpc64/"
+TRANSLATE_TARGETS="sed -e s/ppc/powerpc/ -e s/i386/i686/ -e s/x86_64// \
+  -e s/powerpc64// -e s/ppc64//"
 
 # Build GCC the "Apple way".
 # Parameters:
@@ -20,7 +22,7 @@ HOSTS=`echo $1 | $TRANSLATE_ARCH `
 # compilers will generate code for.  If the current machine isn't in
 # the list, a compiler for it will get built anyway, but won't be
 # installed.
-TARGETS=`echo $2 | $TRANSLATE_ARCH`
+TARGETS=`echo $2 | $TRANSLATE_TARGETS`
 
 # The GNU makefile target ('bootstrap' by default).
 BOOTSTRAP=${BOOTSTRAP-bootstrap}
@@ -30,8 +32,7 @@ BOOTSTRAP=${BOOTSTRAP-bootstrap}
 # $RC_NONARCH_CFLAGS (and mysteriously prepends '-pipe' thereto).
 # We will allow this to override the default $CFLAGS and $CXXFLAGS.
 
-CFLAGS=${RC_NONARCH_CFLAGS/-pipe/}
-CFLAGS=${CFLAGS:-"-g -O2"}
+CFLAGS="-g -O2 ${RC_NONARCH_CFLAGS/-pipe/}"
 
 # This isn't a parameter; it is the architecture of the current machine.
 BUILD=`arch | $TRANSLATE_ARCH`
@@ -70,13 +71,23 @@ VERS=`sed -n -e '/version_string/s/.*\"\([^ \"]*\)[ \"].*/\1/p' \
 # to be built.  It's VERS but only up to the second '.' (if there is one).
 MAJ_VERS=`echo $VERS | sed 's/\([0-9]*\.[0-9]*\)[.-].*/\1/'`
 
-# Sniff to see if we can do ppc64 building.
-DARWIN_VERS=8
-if [ x"`file /usr/lib/crt1.o | grep 'architecture ppc64'`" == x ]; then
-    DARWIN_VERS=7
-fi
+# This is the default architecture for i386 configurations.
+I386_CPU="--with-arch=apple --with-tune=generic"
 
+# APPLE LOCAL begin ARM ARM_CONFIGFLAGS
+# For ARM, grab all system files from an SDK.
+ARM_SYSROOT="/Developer/SDKs/Extra"
+ARM_CONFIGFLAGS="--with-sysroot=\"$ARM_SYSROOT\""
+# APPLE LOCAL end ARM ARM_CONFIGFLAGS
+
+# This is the libstdc++ version to use.
+LIBSTDCXX_VERSION=4.0.0
+
+DARWIN_VERS=`uname -r | sed 's/\..*//'`
 echo DARWIN_VERS = $DARWIN_VERS
+
+# If the user has CC set in their environment unset it now
+unset CC
 
 ########################################
 # Run the build.
@@ -89,20 +100,20 @@ rm -rf $SRC_DIR || exit 1
 mkdir $SRC_DIR || exit 1
 ln -s $ORIG_SRC_DIR/* $SRC_DIR/ || exit 1
 rm -rf $SRC_DIR/tcl $SRC_DIR/expect $SRC_DIR/dejagnu || exit 1
+# Also remove libstdc++ since it is built from a separate project.
+rm -rf $SRC_DIR/libstdc++-v3 || exit 1
+# Clean out old specs files
+rm -f /usr/lib/gcc/*/4.0.0/specs
 
 # These are the configure and build flags that are used.
-CONFIGFLAGS="--disable-checking \
+CONFIGFLAGS="--disable-checking -enable-werror \
   --prefix=$DEST_ROOT \
   --mandir=\${prefix}/share/man \
   --enable-languages=c,objc,c++,obj-c++ \
-  --program-transform-name=/^[cg][^+.-]*$/s/$/-$MAJ_VERS/ \
-  --with-gxx-include-dir=\${prefix}/include/gcc/darwin/$MAJ_VERS/c++ \
+  --program-transform-name=/^[cg][^.-]*$/s/$/-$MAJ_VERS/ \
+  --with-gxx-include-dir=\${prefix}/include/c++/$LIBSTDCXX_VERSION \
+  --with-slibdir=/usr/lib \
   --build=$BUILD-apple-darwin$DARWIN_VERS"
-
-# For 64-bit bringup
-if [ "$VERS" == "3.5.0" ]; then
-  CONFIGFLAGS="$CONFIGFLAGS --enable-bringup --disable-shared --enable-static"
-fi
 
 # Figure out how many make processes to run.
 SYSCTL=`sysctl -n hw.activecpu`
@@ -112,8 +123,8 @@ if [ -z "$SYSCTL" ]; then
   SYSCTL=`sysctl -n hw.ncpu`
 fi
 
-# sysctl -n hw.* does not work when invoked via B&I chroot /BuildRoot. 
-# Builders can default to 2, since even if they are single processor, 
+# sysctl -n hw.* does not work when invoked via B&I chroot /BuildRoot.
+# Builders can default to 2, since even if they are single processor,
 # nothing else is running on the machine.
 if [ -z "$SYSCTL" ]; then
   SYSCTL=2
@@ -126,12 +137,17 @@ MAKEFLAGS=${LOCAL_MAKEFLAGS-"-j $SYSCTL"}
 # because it'll be needed for the bootstrap.
 mkdir -p $DIR/obj-$BUILD-$BUILD $DIR/dst-$BUILD-$BUILD || exit 1
 cd $DIR/obj-$BUILD-$BUILD || exit 1
-if [ \! -f $DIR/$BUILD-configured ] ; then
+if [ \! -f Makefile ]; then
  $SRC_DIR/configure $CONFIGFLAGS \
+   `if [ $BUILD = i686 ] ; then echo $I386_CPU ; fi` \
    --host=$BUILD-apple-darwin$DARWIN_VERS --target=$BUILD-apple-darwin$DARWIN_VERS || exit 1
- touch $DIR/$BUILD-configured || exit 1
 fi
+# Unset RC_DEBUG_OPTIONS because it causes the bootstrap to fail.
+# Also keep unset for cross compilers so that the cross built libraries are
+# comparable to the native built libraries.
+unset RC_DEBUG_OPTIONS
 make $MAKEFLAGS $BOOTSTRAP CFLAGS="$CFLAGS" CXXFLAGS="$CFLAGS" || exit 1
+make $MAKEFLAGS html CFLAGS="$CFLAGS" CXXFLAGS="$CFLAGS" || exit 1
 make $MAKEFLAGS DESTDIR=$DIR/dst-$BUILD-$BUILD install-gcc install-target \
   CFLAGS="$CFLAGS" CXXFLAGS="$CFLAGS" || exit 1
 
@@ -147,7 +163,7 @@ PATH=$DIR/dst-$BUILD-$BUILD/usr/bin:$PATH
 # so we have to use a shell script for indirection, grrr.
 rm -rf $DIR/bin || exit 1
 mkdir $DIR/bin || exit 1
-for prog in ar nm ranlib ; do
+for prog in ar nm ranlib strip lipo ; do
   for t in `echo $TARGETS $HOSTS | sort -u`; do
     P=$DIR/bin/${t}-apple-darwin$DARWIN_VERS-${prog}
     echo '#!/bin/sh' > $P || exit 1
@@ -155,16 +171,29 @@ for prog in ar nm ranlib ; do
     chmod a+x $P || exit 1
   done
 done
+for t in `echo $1 $2 | sort -u`; do
+  gt=`echo $t | $TRANSLATE_ARCH`
+  P=$DIR/bin/${gt}-apple-darwin$DARWIN_VERS-as
+  echo '#!/bin/sh' > $P || exit 1
+  echo 'exec /usr/bin/as -arch '${t}' $*' >> $P || exit 1
+  chmod a+x $P || exit 1
+done
 PATH=$DIR/bin:$PATH
 
 # Build the cross-compilers, using the compiler we just built.
-for t in $TARGETS ; do
+for t in `echo $TARGETS $HOSTS | sort -u`; do
  if [ $t != $BUILD ] ; then
   mkdir -p $DIR/obj-$BUILD-$t $DIR/dst-$BUILD-$t || exit 1
    cd $DIR/obj-$BUILD-$t || exit 1
-   $SRC_DIR/configure $CONFIGFLAGS  \
-     --program-prefix=$t-apple-darwin$DARWIN_VERS- \
-     --host=$BUILD-apple-darwin$DARWIN_VERS --target=$t-apple-darwin$DARWIN_VERS || exit 1
+   if [ \! -f Makefile ]; then
+# APPLE LOCAL begin ARM ARM_CONFIGFLAGS
+    $SRC_DIR/configure $CONFIGFLAGS --enable-werror-always \
+     `if [ $t = i686 ] ; then echo $I386_CPU ; fi` \
+     `if [ $t = 'arm' ] ; then echo $ARM_CONFIGFLAGS ; fi` \
+      --program-prefix=$t-apple-darwin$DARWIN_VERS- \
+      --host=$BUILD-apple-darwin$DARWIN_VERS --target=$t-apple-darwin$DARWIN_VERS || exit 1
+# APPLE LOCAL end ARM ARM_CONFIGFLAGS
+   fi
    make $MAKEFLAGS all CFLAGS="$CFLAGS" CXXFLAGS="$CFLAGS" || exit 1
    make $MAKEFLAGS DESTDIR=$DIR/dst-$BUILD-$t install-gcc install-target \
      CFLAGS="$CFLAGS" CXXFLAGS="$CFLAGS" || exit 1
@@ -178,41 +207,9 @@ done
 for t in $TARGETS ; do
   DT=$DIR/dst-$BUILD-$t
   D=`echo $DT/usr/lib/gcc/$t-apple-darwin$DARWIN_VERS/$VERS`
-  if [ $t == $BUILD ] ; then
-    mv $DT/usr/lib/libstdc++.a $D || exit 1
-    mv $DT/usr/lib/libsupc++.a $D || exit 1
-    # 64-bit bringup
-    if [ -f $DT/usr/lib/ppc64/libstdc++.a ]; then
-	mv $DT/usr/lib/ppc64/libstdc++.a $D/ppc64 || exit 1
-	mv $DT/usr/lib/ppc64/libsupc++.a $D/ppc64 || exit 1
-    fi
-  else
-    DD=$DT/usr/${t}-apple-darwin$DARWIN_VERS/lib
-    mv $DD/libstdc++.a $D || exit 1
-    mv $DD/libsupc++.a $D || exit 1
-    # 64-bit bringup
-    if [ -f $DD/ppc64/libstdc++.a ]; then
-	mv $DD/ppc64/libstdc++.a $D/ppc64 || exit 1
-	mv $DD/ppc64/libsupc++.a $D/ppc64 || exit 1
-    fi
-  fi
   mv $D/static/libgcc.a $D/libgcc_static.a || exit 1
   mv $D/kext/libgcc.a $D/libcc_kext.a || exit 1
   rm -r $D/static $D/kext || exit 1
-done
-
-# Make all symbols in libgcc.a private extern.  This is a temporary fix
-# and should be removed after we merge with mainline 4.0 final.
-for t in $TARGETS ; do
-  DT=$DIR/dst-$BUILD-$t
-  D=`echo $DT/usr/lib/gcc/$t-apple-darwin$DARWIN_VERS/$VERS`
-  D64=$D/ppc64
-
-  for lib in $D/libgcc.a $D/libgcc_eh.a $D/libgcc_static.a $D/libgcc_eh.a $D64/libgcc.a $D64/libgcc_eh.a $D/libcc_kext.a ; do
-    if [ -f $lib ] ; then
-      nmedit -p $lib
-    fi
-  done
 done
 
 # Build the cross-hosted compilers.
@@ -227,9 +224,15 @@ for h in $HOSTS ; do
 	pp=$t-apple-darwin$DARWIN_VERS-
       fi
 
-      $SRC_DIR/configure $CONFIGFLAGS \
-        --program-prefix=$pp \
-        --host=$h-apple-darwin$DARWIN_VERS --target=$t-apple-darwin$DARWIN_VERS || exit 1
+      if [ \! -f Makefile ]; then
+# APPLE LOCAL begin ARM ARM_CONFIGFLAGS
+        $SRC_DIR/configure $CONFIGFLAGS \
+	  `if [ $t = i686 ] ; then echo $I386_CPU ; fi` \
+	  `if [ $t = 'arm' ] && [ $h != 'arm' ] ; then echo $ARM_CONFIGFLAGS ; fi` \
+          --program-prefix=$pp \
+          --host=$h-apple-darwin$DARWIN_VERS --target=$t-apple-darwin$DARWIN_VERS || exit 1
+# APPLE LOCAL end ARM ARM_CONFIGFLAGS
+      fi
       make $MAKEFLAGS all-gcc CFLAGS="$CFLAGS" CXXFLAGS="$CFLAGS" || exit 1
       make $MAKEFLAGS DESTDIR=$DIR/dst-$h-$t install-gcc \
         CFLAGS="$CFLAGS" CXXFLAGS="$CFLAGS" || exit 1
@@ -247,9 +250,9 @@ cd $DEST_DIR || exit 1
 rm -rf * || exit 1
 
 # HTML documentation
-HTMLDIR="/Developer/ADC Reference Library/documentation/DeveloperTools"
+HTMLDIR="/Developer/Documentation/DocSets/com.apple.ADC_Reference_Library.DeveloperTools.docset/Contents/Resources/Documents/documentation/DeveloperTools"
 mkdir -p ".$HTMLDIR" || exit 1
-cp -Rp $DIR/obj-$BUILD-$BUILD/gcc/doc/HTML/* ".$HTMLDIR/" || exit 1
+cp -Rp $DIR/obj-$BUILD-$BUILD/gcc/HTML/* ".$HTMLDIR/" || exit 1
 
 # Manual pages
 mkdir -p .$DEST_ROOT/share || exit 1
@@ -259,7 +262,7 @@ cp -Rp $DIR/dst-$BUILD-$BUILD$DEST_ROOT/share/man .$DEST_ROOT/share/ \
 # libexec
 cd $DIR/dst-$BUILD-$BUILD$DEST_ROOT/libexec/gcc/$BUILD-apple-darwin$DARWIN_VERS/$VERS \
   || exit 1
-LIBEXEC_FILES=`find . -type f -print || exit 1` 
+LIBEXEC_FILES=`find . -type f -print || exit 1`
 LIBEXEC_DIRS=`find . -type d -print || exit 1`
 cd $DEST_DIR || exit 1
 for t in $TARGETS ; do
@@ -274,6 +277,8 @@ for t in $TARGETS ; do
       cp -p $DIR/dst-$BUILD-$t$DL/$f .$DL/$f || exit 1
     fi
   done
+  ln -s ../../../../bin/as .$DL/as
+  ln -s ../../../../bin/ld .$DL/ld
 done
 
 # bin
@@ -281,7 +286,7 @@ done
 BIN_FILES=`ls $DIR/dst-$BUILD-$BUILD$DEST_ROOT/bin | grep '^[^-]*-[0-9.]*$' \
   | grep -v gccbug | grep -v gcov || exit 1`
 mkdir .$DEST_ROOT/bin
-for f in $BIN_FILES ; do 
+for f in $BIN_FILES ; do
   lipo -output .$DEST_ROOT/bin/$f -create $DIR/dst-*$DEST_ROOT/bin/$f || exit 1
 done
 # gcov, which is special only because it gets built multiple times and lipo
@@ -294,7 +299,7 @@ for t in $TARGETS ; do
   lipo -output .$DEST_ROOT/bin/$t-apple-darwin$DARWIN_VERS-gcc-$VERS -create \
     $DIR/dst-*-$t$DEST_ROOT/bin/$t-apple-darwin$DARWIN_VERS-gcc-$VERS || exit 1
   lipo -output .$DEST_ROOT/bin/$t-apple-darwin$DARWIN_VERS-g++-$VERS -create \
-    $DIR/dst-*-$t$DEST_ROOT/bin/$t-apple-darwin$DARWIN_VERS-g++ || exit 1
+    $DIR/dst-*-$t$DEST_ROOT/bin/$t-apple-darwin$DARWIN_VERS-g++* || exit 1
 done
 
 # lib
@@ -304,87 +309,24 @@ for t in $TARGETS ; do
     .$DEST_ROOT/lib/gcc || exit 1
 done
 
-SHARED_LIBS=`ls $DIR/dst-$BUILD-$BUILD$DEST_ROOT/lib | grep '\.dylib$'`
-for l in $SHARED_LIBS ; do
-  F=$DIR/dst-$BUILD-$BUILD$DEST_ROOT/lib/$l
-  if [ \! -L $F ] ; then
-    # The following bit sniffs for a ppc64 libstdc++ dylib to lipo in.
-    multi=$DIR/dst-$BUILD-$BUILD$DEST_ROOT/lib/ppc64/$l
-    if [ \! -f $multi ] ; then
-      multi=
-    fi
-    if [ -f $DIR/dst-$BUILD-*$DEST_ROOT/*-apple-darwin$DARWIN_VERS/lib/$l ] ; then
-      lipo -output .$DEST_ROOT/lib/$l -create $F $multi \
-	$DIR/dst-$BUILD-*$DEST_ROOT/*-apple-darwin$DARWIN_VERS/lib/$l || exit 1
-    else
-      cp -p $F .$DEST_ROOT/lib/$l || exit 1
-    fi
-    F1=`echo $l \
-	| sed 's/\(\.[0-9]\{1,\}\)\(\.[0-9]\{1,\}\)\{1,\}\.dylib/\1.dylib/'`
-    F0=`echo $l | sed 's/\(\.[0-9]\{1,\}\)\{1,\}\.dylib/.dylib/'`
-    ln -s $l .$DEST_ROOT/lib/$F1 || exit 1
-    for t in $TARGETS ; do
-      ln -s ../../../$F1 .$DEST_ROOT/lib/gcc/$t-apple-darwin$DARWIN_VERS/$VERS/$F0 \
-        || exit 1
-    done
+# APPLE LOCAL begin ARM armv6 dylib
+for t in $TARGETS ; do
+  if [ "$t" == 'arm' ] ; then
+    cp -p $ARM_SYSROOT/usr/lib/libstdc++.6.dylib \
+      .$DEST_ROOT/lib/gcc/$t-apple-darwin$DARWIN_VERS/$VERS/libstdc++.dylib \
+      || exit 1
+  else
+    cp -p /usr/lib/libstdc++.6.dylib \
+      .$DEST_ROOT/lib/gcc/$t-apple-darwin$DARWIN_VERS/$VERS/libstdc++.dylib \
+      || exit 1
   fi
+  strip -x -c .$DEST_ROOT/lib/gcc/$t-apple-darwin$DARWIN_VERS/$VERS/libstdc++.dylib || exit 1
 done
-
-for l in $SHARED_LIBS ; do
-  F=$DEST_ROOT/lib/$l
-  F1=`echo $l \
-        | sed 's/\(\.[0-9]\{1,\}\)\(\.[0-9]\{1,\}\)\{1,\}\.dylib/\1.dylib/'`
-  if [ -f .$F ] ; then
-
-    # Now that we've lipo'ed things together, change the install name
-    # to match the official path.  The destination should always be
-    # shorter than the full name, so this should always work.  The
-    # install name should be the symlink with the major version number
-    # so that apps using the library (and the install name) will link
-    # against the symlink and get the latest version.
-    # Also change dependent library names so that libstdc++.6.0.2.dylib
-    # (for example) links against libgcc.1.dylib to avoid link errors.
-
-    install_name_tool -id $DEST_ROOT/lib/$F1 .$F
-
-    # At this point, l is the name of the library we're rewriting.
-    # .$DEST_ROOT/lib/$F1 is the major version of the library.
-
-    # For every other shared library: change the name from short name to major
-    for subl in $SHARED_LIBS ; do
-      SUBF=.$DEST_ROOT/lib/$subl
-      if [ -f $SUBF ] ; then
-        install_name_tool -change $DEST_ROOT/lib/$l $DEST_ROOT/lib/$F1 $SUBF
-      fi
-    done
-
-    # For every other library and architecture, check to see if any of the
-    # dependent library names happens to be the bogus name given during a cross
-    # compile.
-    for usinglib in $SHARED_LIBS ; do
-      USINGPATH=.$DEST_ROOT/lib/$usinglib
-      if [ -f $USINGPATH ] ; then
-        for t1 in $TARGETS ; do
-          BADPATH=$DEST_ROOT/$t-apple-darwin$DARWIN_VERS/lib/$l 
-          GOODPATH=$DEST_ROOT/lib/$F1
-          # Deal with the weird names generated for cross compiler portions.
-          install_name_tool -change $BADPATH $GOODPATH $USINGPATH
-        done
-      fi
-    done
-  fi
-done  
+# APPLE LOCAL end ARM armv6 dylib
 
 # include
 HEADERPATH=$DEST_ROOT/include/gcc/darwin/$MAJ_VERS
 mkdir -p .$HEADERPATH || exit 1
-cp -Rp $DIR/dst-$BUILD-$BUILD$HEADERPATH/c++ \
-  .$HEADERPATH/ || exit 1
-for t in $TARGETS ; do
-  DS=$HEADERPATH/c++
-  [ $t = $BUILD ] || \
-    cp -Rp $DIR/dst-$BUILD-$t$DS/$t-apple-darwin$DARWIN_VERS .$DS/ || exit 1
-done
 
 # Some headers are installed from more-hdrs/.  They all share
 # one common feature: they shouldn't be installed here.  Sometimes,
@@ -405,55 +347,43 @@ for h in `echo *.h` ; do
     done
   fi
 done
-mkdir -p $DEST_DIR$HEADERPATH/machine
-for h in `echo */*.h` ; do
-  if [ ! -f /usr/include/$h -o -L /usr/include/$h ] ; then
-    cp -R $h $DEST_DIR$HEADERPATH/$h || exit 1
-    for t in $TARGETS ; do
-      THEADERPATH=$DEST_DIR$DEST_ROOT/lib/gcc/${t}-apple-darwin$DARWIN_VERS/$VERS/include
-      mkdir -p $THEADERPATH/machine
-      # In fixincludes/fixinc.in we created this file...  always link for now
-      [ -f /disable/$THEADERPATH/$h ] || \
-        ln -f -s ../../../../../../include/gcc/darwin/$MAJ_VERS/$h $THEADERPATH/$h || \
-        exit 1
-    done
-  fi
-done
 
-# Install man pages using version number.
-# Only g++ man page needs rename. gcc, cpp and gcov man page are already 
-# installed using proper name.
-mv $DEST_DIR$DEST_ROOT/share/man/man1/g++.1 \
-   $DEST_DIR$DEST_ROOT/share/man/man1/g++-$MAJ_VERS.1
-ln -f $DEST_DIR$DEST_ROOT/share/man/man1/g++-$MAJ_VERS.1 \
-   $DEST_DIR$DEST_ROOT/share/man/man1/c++-$MAJ_VERS.1
+# Add extra man page symlinks for 'c++' and for arch-specific names.
+MDIR=$DEST_DIR$DEST_ROOT/share/man/man1
+ln -f $MDIR/g++-$MAJ_VERS.1 $MDIR/c++-$MAJ_VERS.1 || exit 1
 for t in $TARGETS ; do
-  ln -f $DEST_DIR$DEST_ROOT/share/man/man1/gcc-$MAJ_VERS.1 \
-     $DEST_DIR$DEST_ROOT/share/man/man1/$t-apple-darwin$DARWIN_VERS-gcc-$VERS.1
-  ln -f $DEST_DIR$DEST_ROOT/share/man/man1/g++-$MAJ_VERS.1 \
-     $DEST_DIR$DEST_ROOT/share/man/man1/$t-apple-darwin$DARWIN_VERS-g++-$VERS.1
+  ln -f $MDIR/gcc-$MAJ_VERS.1 $MDIR/$t-apple-darwin$DARWIN_VERS-gcc-$VERS.1 \
+      || exit 1
+  ln -f $MDIR/g++-$MAJ_VERS.1 $MDIR/$t-apple-darwin$DARWIN_VERS-g++-$VERS.1 \
+      || exit 1
 done
 
+# APPLE LOCAL begin ARM native compiler support
 # Build driver-driver using fully-named drivers
-for t in $TARGETS ; do
-    $DEST_DIR$DEST_ROOT/bin/$t-apple-darwin$DARWIN_VERS-gcc-$VERS                          \
-	$ORIG_SRC_DIR/gcc/config/darwin-driver.c                               \
+for h in $HOSTS ; do
+    $DIR/dst-$BUILD-$h$DEST_ROOT/bin/$h-apple-darwin$DARWIN_VERS-gcc-$VERS     \
+	$ORIG_SRC_DIR/driverdriver.c                               \
 	-DPDN="\"-apple-darwin$DARWIN_VERS-gcc-$VERS\""                                    \
 	-DIL="\"$DEST_ROOT/bin/\"" -I  $ORIG_SRC_DIR/include                   \
 	-I  $ORIG_SRC_DIR/gcc -I  $ORIG_SRC_DIR/gcc/config                     \
-	-liberty -L$DIR/dst-$BUILD-$t$DEST_ROOT/lib/                           \
-	-L$DIR/dst-$BUILD-$t$DEST_ROOT/$t-apple-darwin$DARWIN_VERS/lib/                    \
-	-o $DEST_DIR/$DEST_ROOT/bin/tmp-$t-gcc-$MAJ_VERS || exit 1
+	-liberty -L$DIR/dst-$BUILD-$h$DEST_ROOT/lib/                           \
+	-L$DIR/dst-$BUILD-$h$DEST_ROOT/$h-apple-darwin$DARWIN_VERS/lib/                    \
+        -L$DIR/obj-$h-$BUILD/libiberty/                                        \
+        -L$DIR/obj-$h-$h/libiberty/                                        \
+	-o $DEST_DIR/$DEST_ROOT/bin/tmp-$h-gcc-$MAJ_VERS || exit 1
 
-    $DEST_DIR$DEST_ROOT/bin/$t-apple-darwin$DARWIN_VERS-gcc-$VERS                          \
-	$ORIG_SRC_DIR/gcc/config/darwin-driver.c                               \
+    $DIR/dst-$BUILD-$h$DEST_ROOT/bin/$h-apple-darwin$DARWIN_VERS-gcc-$VERS                 \
+	$ORIG_SRC_DIR/driverdriver.c                               \
 	-DPDN="\"-apple-darwin$DARWIN_VERS-g++-$VERS\""                                    \
 	-DIL="\"$DEST_ROOT/bin/\"" -I  $ORIG_SRC_DIR/include                   \
 	-I  $ORIG_SRC_DIR/gcc -I  $ORIG_SRC_DIR/gcc/config                     \
-	-liberty -L$DIR/dst-$BUILD-$t$DEST_ROOT/lib/                           \
-	-L$DIR/dst-$BUILD-$t$DEST_ROOT/$t-apple-darwin$DARWIN_VERS/lib/                    \
-	-o $DEST_DIR/$DEST_ROOT/bin/tmp-$t-g++-$MAJ_VERS || exit 1
+	-liberty -L$DIR/dst-$BUILD-$h$DEST_ROOT/lib/                           \
+	-L$DIR/dst-$BUILD-$h$DEST_ROOT/$h-apple-darwin$DARWIN_VERS/lib/                    \
+        -L$DIR/obj-$h-$BUILD/libiberty/                                        \
+        -L$DIR/obj-$h-$h/libiberty/                                        \
+	-o $DEST_DIR/$DEST_ROOT/bin/tmp-$h-g++-$MAJ_VERS || exit 1
 done
+# APPLE LOCAL end ARM native compiler support
 
 lipo -output $DEST_DIR/$DEST_ROOT/bin/gcc-$MAJ_VERS -create \
   $DEST_DIR/$DEST_ROOT/bin/tmp-*-gcc-$MAJ_VERS || exit 1
@@ -463,21 +393,24 @@ lipo -output $DEST_DIR/$DEST_ROOT/bin/g++-$MAJ_VERS -create \
 
 ln -f $DEST_DIR/$DEST_ROOT/bin/g++-$MAJ_VERS $DEST_DIR/$DEST_ROOT/bin/c++-$MAJ_VERS || exit 1
 
-rm $DEST_DIR/$DEST_ROOT/bin/tmp-*-gcc-$MAJ_VERS || exit 1 
+rm $DEST_DIR/$DEST_ROOT/bin/tmp-*-gcc-$MAJ_VERS || exit 1
 rm $DEST_DIR/$DEST_ROOT/bin/tmp-*-g++-$MAJ_VERS || exit 1
 
-
 ########################################
-# Save the source files and objects needed for debugging
+# Create SYM_DIR with information required for debugging.
 
 cd $SYM_DIR || exit 1
 
 # Clean out SYM_DIR in case -noclean was passed to buildit.
 rm -rf * || exit 1
 
-# Save executables and libraries.
+# Generate .dSYM files
+find $DEST_DIR -perm -0111 \! -name fixinc.sh \
+    \! -name mkheaders -type f -print | xargs -n 1 -P ${SYSCTL} dsymutil
+
+# Save .dSYM files and .a archives
 cd $DEST_DIR || exit 1
-find . \( -perm -0111 -or -name \*.a \) -type f -print \
+find . \( -path \*.dSYM/\* -or -name \*.a \) -print \
   | cpio -pdml $SYM_DIR || exit 1
 # Save source files.
 mkdir $SYM_DIR/src || exit 1
@@ -485,20 +418,16 @@ cd $DIR || exit 1
 find obj-* -name \*.\[chy\] -print | cpio -pdml $SYM_DIR/src || exit 1
 
 ########################################
-# Strip the executables and libraries
-find $DEST_DIR -perm -0111 \! -name \*.dylib -type f -print \
-  | xargs strip || exit 1
-find $DEST_DIR \( -name \*.a -or -name \*.dylib \) -type f -print \
-  | xargs strip -SX || exit 1
-find $DEST_DIR -name \*.a -type f -print \
-  | xargs ranlib || exit 1
+# Remove debugging information from DEST_DIR.
 
-if [ "$MAJ_VERS" = "3.5" ]; then
-    rm -f `find $DEST_DIR -name \*.dylib -print`
-    rm -f $DEST_DIR$DEST_ROOT/share/man/man7/fsf-funding.7
-    rm -f $DEST_DIR$DEST_ROOT/share/man/man7/gfdl.7
-    rm -f $DEST_DIR$DEST_ROOT/share/man/man7/gpl.7
-fi
+find $DEST_DIR -perm -0111 \! -name fixinc.sh \
+    \! -name mkheaders \! -name libstdc++.dylib -type f -print \
+  | xargs strip || exit 1
+find $DEST_DIR -name \*.a -print | xargs strip -SX || exit 1
+find $DEST_DIR -name \*.a -print | xargs ranlib || exit 1
+find $DEST_DIR -name \*.dSYM -print | xargs rm -r || exit 1
+chgrp -h -R wheel $DEST_DIR
+chgrp -R wheel $DEST_DIR
 
 # Done!
 exit 0

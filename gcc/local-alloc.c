@@ -67,7 +67,6 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "rtl.h"
 #include "tm_p.h"
 #include "flags.h"
-#include "basic-block.h"
 #include "regs.h"
 #include "function.h"
 #include "insn-config.h"
@@ -1118,7 +1117,8 @@ update_equiv_regs (void)
   /* Clear all dead REGNOs from all basic block's live info.  */
   if (clear_regnos)
     {
-      int j;
+      unsigned j;
+      
       if (clear_regnos > 8)
 	{
 	  FOR_EACH_BB (bb)
@@ -1314,9 +1314,8 @@ block_alloc (int b)
 		  if (hard_reg != NULL_RTX)
 		    {
 		      if (REG_P (hard_reg)
-			  && IN_RANGE (REGNO (hard_reg),
-				       0, FIRST_PSEUDO_REGISTER - 1)
-			  && ! call_used_regs[REGNO (hard_reg)])
+			  && REGNO (hard_reg) < FIRST_PSEUDO_REGISTER
+			  && !call_used_regs[REGNO (hard_reg)])
 			continue;
 		    }
 
@@ -1546,9 +1545,25 @@ block_alloc (int b)
      First try the register class that is cheapest for this qty,
      if there is more than one class.  */
 
+/* APPLE LOCAL begin ARM conditionally disable local RA */
+/* At -O0 GRA is not run, so turning off LRA as well is a bad idea.  (Appears
+   to be needed for correctness as well; non-local goto's load FP, then SP,
+   from saved locations in memory; if the memory address has to be reloaded
+   from [FP+offset] in between this doesn't work, see gcc.c-torture/execute/
+   920428-2.c and others.  I'm not entirely sure running LRA is enough to
+   guarantee this will work anyway, but it works on the dejagnu cases, and
+   this isn't an important enough issue to dig into just now....if a fix
+   is needed probably we need a special pattern to represent both loads
+   at once.) */
+if (flag_local_alloc || !optimize)
+/* APPLE LOCAL end ARM conditionally disable local RA */
   for (i = 0; i < next_qty; i++)
     {
       q = qty_order[i];
+      /* APPLE LOCAL begin 4321079 */
+      if (optimize && VECTOR_MODE_P (qty[q].mode))
+	continue;
+      /* APPLE LOCAL end 4321079 */
       if (qty[q].phys_reg < 0)
 	{
 #ifdef INSN_SCHEDULING
@@ -2011,7 +2026,7 @@ reg_is_born (rtx reg, int birth)
     {
       regno = REGNO (SUBREG_REG (reg));
       if (regno < FIRST_PSEUDO_REGISTER)
-	regno = subreg_hard_regno (reg, 1);
+	regno = subreg_regno (reg);
     }
   else
     regno = REGNO (reg);
@@ -2192,6 +2207,12 @@ find_free_reg (enum reg_class class, enum machine_mode mode, int qtyno,
 #else
       int regno = i;
 #endif
+/* APPLE LOCAL begin ARM add DIMODE_REG_ALLOC_ORDER */
+#ifdef DIMODE_REG_ALLOC_ORDER
+      if (mode == DImode)
+	regno = dimode_reg_alloc_order[i];
+#endif
+/* APPLE LOCAL end ARM add DIMODE_REG_ALLOC_ORDER */
       if (! TEST_HARD_REG_BIT (first_used, regno)
 	  && HARD_REGNO_MODE_OK (regno, mode)
 	  && (qty[qtyno].n_calls_crossed == 0

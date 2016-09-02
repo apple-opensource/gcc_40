@@ -1,4 +1,4 @@
-/* APPLE LOCAL file Objective-C++ */
+/* APPLE LOCAL file mainline */
 /* Process the ObjC-specific declarations and variables for 
    the Objective-C++ compiler.
    Copyright (C) 2001, 2004 Free Software Foundation, Inc.
@@ -30,7 +30,6 @@ extern void objcp_finish_function (void);
 extern tree objcp_lookup_name (tree);
 extern tree objcp_build_function_call (tree, tree);
 extern tree objcp_xref_tag (enum tree_code, tree);
-extern tree objcp_build_component_ref (tree, tree);
 extern int objcp_comptypes (tree, tree);
 extern tree objcp_builtin_function (const char *, tree, int, 
 				    enum built_in_class, const char *, tree);
@@ -52,8 +51,6 @@ extern tree objcp_end_compound_stmt (tree, int);
 	objcp_lookup_name (name)
 #define xref_tag(code, name) \
 	objcp_xref_tag (code, name)
-#define build_component_ref(datum, component) \
-        objcp_build_component_ref (datum, component)
 #define comptypes(type1, type2) \
 	objcp_comptypes (type1, type2)
 #define c_begin_compound_stmt(flags) \
@@ -72,6 +69,18 @@ extern tree objcp_end_compound_stmt (tree, int);
     DECL_NAME (TYPE_NAME (type)) = name; \
   else \
     TYPE_NAME (type) = name;
+
+#undef TYPE_OBJC_INFO
+#define TYPE_OBJC_INFO(TYPE) LANG_TYPE_CLASS_CHECK (TYPE)->objc_info
+#undef SIZEOF_OBJC_TYPE_LANG_SPECIFIC
+#define SIZEOF_OBJC_TYPE_LANG_SPECIFIC sizeof (struct lang_type_class)
+#undef ALLOC_OBJC_TYPE_LANG_SPECIFIC
+#define ALLOC_OBJC_TYPE_LANG_SPECIFIC(NODE)				\
+  do {									\
+    TYPE_LANG_SPECIFIC (NODE) = GGC_CNEWVAR	                        \
+      (struct lang_type, sizeof (struct lang_type_class));		\
+    TYPE_LANG_SPECIFIC (NODE)->u.c.h.is_lang_type_class = 1;		\
+  } while (0)
 
 #define OBJCP_ORIGINAL_FUNCTION(name, args) 	(name)args
 

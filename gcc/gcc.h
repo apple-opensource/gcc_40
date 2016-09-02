@@ -52,8 +52,11 @@ struct spec_function
   || !strcmp (STR, "iwithprefix") || !strcmp (STR, "iwithprefixbefore") \
   || !strcmp (STR, "iquote") || !strcmp (STR, "isystem") \
   || !strcmp (STR, "isysroot") \
+  /* APPLE LOCAL ARM iwithsysroot 4917039 */ \
+  || !strcmp (STR, "iwithsysroot") \
   || !strcmp (STR, "-param") || !strcmp (STR, "specs") \
   || !strcmp (STR, "MF") || !strcmp (STR, "MT") || !strcmp (STR, "MQ"))
+
 
 /* These are exported by gcc.c.  */
 extern int do_spec (const char *);

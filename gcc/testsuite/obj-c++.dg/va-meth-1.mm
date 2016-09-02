@@ -1,8 +1,9 @@
-/* APPLE LOCAL file Objective-C++ */
+/* APPLE LOCAL file mainline */
 /* Based on objc/execute/va_method.m, by Nicola Pero */
 /* { dg-do run } */
 
-#include <objc/Object.h>
+/* APPLE LOCAL radar 4894756 */
+#include "../objc/execute/Object2.h"
 #include <stdarg.h>
 #include <stdlib.h>
 

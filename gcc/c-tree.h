@@ -1,6 +1,6 @@
 /* Definitions for C parsing and type checking.
    Copyright (C) 1987, 1993, 1994, 1995, 1997, 1998,
-   1999, 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+   1999, 2000, 2001, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -25,7 +25,7 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "c-common.h"
 #include "diagnostic.h"
 
-/* APPLE LOCAL begin objc speedup --dpatel */
+/* APPLE LOCAL begin mainline */
 /* Definition of 'struct lang_identifier' has been moved here from c-decl.c.
    so that ObjC can see it.  */
    
@@ -41,12 +41,12 @@ struct lang_identifier GTY(())
   struct c_binding *label_binding;  /* labels */
   tree interface_value;             /* ObjC interface, if any */
 };
-/* APPLE LOCAL end objc speedup --dpatel */
+/* APPLE LOCAL end mainline */
 
 /* struct lang_identifier is private to c-decl.c, but langhooks.c needs to
    know how big it is.  This is sanity-checked in c-decl.c.  */
 #define C_SIZEOF_STRUCT_LANG_IDENTIFIER \
-  /* APPLE LOCAL objc speedup --dpatel */ \
+  /* APPLE LOCAL mainline */ \
   (sizeof (struct c_common_identifier) + 4 * sizeof (void *))
 
 /* For gc purposes, return the most likely link for the longest chain.  */
@@ -60,10 +60,7 @@ struct lang_identifier GTY(())
 
 struct lang_decl GTY(())
 {
-  /* The return types and parameter types may have variable size.
-     This is a list of any SAVE_EXPRs that need to be evaluated to
-     compute those sizes.  */
-  tree pending_sizes;
+  char dummy;
 };
 
 /* In a RECORD_TYPE or UNION_TYPE, nonzero if any component is read-only.  */
@@ -92,6 +89,10 @@ struct lang_type GTY(())
   /* In an ENUMERAL_TYPE, the min and max values.  */
   tree enum_min;
   tree enum_max;
+  /* In a RECORD_TYPE, information specific to Objective-C, such
+     as a list of adopted protocols or a pointer to a corresponding
+     @interface.  See objc/objc-act.h for details.  */
+  tree objc_info;
 };
 
 /* Record whether a type or decl was written with nonconstant size.
@@ -111,7 +112,13 @@ struct lang_type GTY(())
 
 /* For FUNCTION_DECLs, evaluates true if the decl is built-in but has
    been declared.  */
-#define C_DECL_DECLARED_BUILTIN(EXP) DECL_LANG_FLAG_3 (EXP)
+#define C_DECL_DECLARED_BUILTIN(EXP)		\
+  DECL_LANG_FLAG_3 (FUNCTION_DECL_CHECK (EXP))
+
+/* For FUNCTION_DECLs, evaluates true if the decl is built-in, has a
+   built-in prototype and does not have a non-built-in prototype.  */
+#define C_DECL_BUILTIN_PROTOTYPE(EXP)		\
+  DECL_LANG_FLAG_6 (FUNCTION_DECL_CHECK (EXP))
 
 /* Record whether a decl was declared register.  This is strictly a
    front-end flag, whereas DECL_REGISTER is used for code generation;
@@ -122,7 +129,30 @@ struct lang_type GTY(())
    unevaluated operand of sizeof / typeof / alignof.  This is only
    used for functions declared static but not defined, though outside
    sizeof and typeof it is set for other function decls as well.  */
-#define C_DECL_USED(EXP) DECL_LANG_FLAG_5 (EXP)
+#define C_DECL_USED(EXP) DECL_LANG_FLAG_5 (FUNCTION_DECL_CHECK (EXP))
+
+/* Record whether a label was defined in a statement expression which
+   has finished and so can no longer be jumped to.  */
+#define C_DECL_UNJUMPABLE_STMT_EXPR(EXP)	\
+  DECL_LANG_FLAG_6 (LABEL_DECL_CHECK (EXP))
+
+/* Record whether a label was the subject of a goto from outside the
+   current level of statement expression nesting and so cannot be
+   defined right now.  */
+#define C_DECL_UNDEFINABLE_STMT_EXPR(EXP)	\
+  DECL_LANG_FLAG_7 (LABEL_DECL_CHECK (EXP))
+
+/* Record whether a label was defined in the scope of an identifier
+   with variably modified type which has finished and so can no longer
+   be jumped to.  */
+#define C_DECL_UNJUMPABLE_VM(EXP)	\
+  DECL_LANG_FLAG_3 (LABEL_DECL_CHECK (EXP))
+
+/* Record whether a label was the subject of a goto from outside the
+   current level of scopes of identifiers with variably modified type
+   and so cannot be defined right now.  */
+#define C_DECL_UNDEFINABLE_VM(EXP)	\
+  DECL_LANG_FLAG_5 (LABEL_DECL_CHECK (EXP))
 
 /* Nonzero for a decl which either doesn't exist or isn't a prototype.
    N.B. Could be simplified if all built-in decls had complete prototypes
@@ -144,7 +174,7 @@ struct c_expr
   /* The value of the expression.  */
   tree value;
   /* Record the original binary operator of an expression, which may
-     have been changed by fold, STRING_CST for unparenthesised string
+     have been changed by fold, STRING_CST for unparenthesized string
      constants, or ERROR_MARK for other expressions (including
      parenthesized expressions).  */
   enum tree_code original_code;
@@ -250,7 +280,7 @@ struct c_declspecs {
   BOOL_BITFIELD private_extern_p : 1;
   /* APPLE LOCAL end private extern */
   /* APPLE LOCAL CW asm blocks */
-  BOOL_BITFIELD cw_asm_specbit : 1;
+  BOOL_BITFIELD iasm_asm_specbit : 1;
   /* Whether the type defaulted to "int" because there were no type
      specifiers.  */
   BOOL_BITFIELD default_int_p;
@@ -303,6 +333,10 @@ struct c_arg_info {
   /* A list of non-parameter decls (notably enumeration constants)
      defined with the parameters.  */
   tree others;
+  /* APPLE LOCAL begin mainline 2006-05-18 4336222 */
+  /* True when these arguments had [*].  */
+  BOOL_BITFIELD had_vla_unspec : 1;
+  /* APPLE LOCAL end mainline 2006-05-18 4336222 */
 };
 
 /* A declarator.  */
@@ -370,7 +404,47 @@ struct language_function GTY(())
   int returns_null;
   int returns_abnormally;
   int warn_about_return_type;
-  int extern_inline;
+/* APPLE LOCAL begin for-4_3 4134307 */
+/* APPLE LOCAL end for-4_3 4134307 */
+};
+
+/* Save lists of labels used or defined in particular contexts.
+   Allocated on the parser obstack.  */
+
+struct c_label_list
+{
+  /* The label at the head of the list.  */
+  tree label;
+  /* The rest of the list.  */
+  struct c_label_list *next;
+};
+
+/* Statement expression context.  */
+
+struct c_label_context_se
+{
+  /* The labels defined at this level of nesting.  */
+  struct c_label_list *labels_def;
+  /* The labels used at this level of nesting.  */
+  struct c_label_list *labels_used;
+  /* The next outermost context.  */
+  struct c_label_context_se *next;
+};
+
+/* Context of variably modified declarations.  */
+
+struct c_label_context_vm
+{
+  /* The labels defined at this level of nesting.  */
+  struct c_label_list *labels_def;
+  /* The labels used at this level of nesting.  */
+  struct c_label_list *labels_used;
+  /* The scope of this context.  Multiple contexts may be at the same
+     numbered scope, since each variably modified declaration starts a
+     new context.  */
+  unsigned scope;
+  /* The next outermost context.  */
+  struct c_label_context_vm *next;
 };
 
 
@@ -401,7 +475,6 @@ extern struct c_declarator *build_array_declarator (tree, struct c_declspecs *,
 extern tree build_enumerator (tree, tree);
 extern void check_for_loop_decls (void);
 extern void mark_forward_parm_decls (void);
-extern int  complete_array_type (tree, tree, int);
 extern void declare_parm_level (void);
 extern void undeclared_variable (tree);
 extern tree declare_label (tree);
@@ -417,6 +490,8 @@ extern tree grokparm (const struct c_parm *);
 extern tree implicitly_declare (tree);
 extern void keep_next_level (void);
 extern tree lookup_name (tree);
+/* APPLE LOCAL mainline lookup_name 4125055 */
+extern tree lookup_name_two (tree, int);
 extern void pending_xref_error (void);
 extern void c_push_function_context (struct function *);
 extern void c_pop_function_context (struct function *);
@@ -462,24 +537,15 @@ extern int c_cannot_inline_tree_fn (tree *);
 extern bool c_objc_common_init (void);
 extern bool c_missing_noreturn_ok_p (tree);
 extern tree c_objc_common_truthvalue_conversion (tree expr);
-extern int defer_fn (tree);
 extern bool c_warn_unused_global_decl (tree);
 extern void c_initialize_diagnostics (diagnostic_context *);
+/* APPLE LOCAL mainline 2006-05-18 4336222 */
+extern bool c_vla_unspec_p (tree x, tree fn);
 
 #define c_build_type_variant(TYPE, CONST_P, VOLATILE_P)		  \
   c_build_qualified_type ((TYPE),				  \
 			  ((CONST_P) ? TYPE_QUAL_CONST : 0) |	  \
 			  ((VOLATILE_P) ? TYPE_QUAL_VOLATILE : 0))
-
-/* APPLE LOCAL begin new tree dump */
-/* in c-dmp-tree.c */
-extern void c_dump_identifier   		PARAMS ((FILE *, tree, int, int));
-extern void c_dump_decl	   			PARAMS ((FILE *, tree, int, int));
-extern void c_dump_type	   			PARAMS ((FILE *, tree, int, int));
-extern int  c_dump_blank_line_p 		PARAMS ((tree, tree));
-extern int  c_dump_lineno_p 			PARAMS ((FILE *, tree));
-extern int  c_dmp_tree3				PARAMS ((FILE *, tree, int));
-/* APPLE LOCAL end new tree dump */
 
 /* in c-typeck.c */
 extern int in_alignof;
@@ -487,11 +553,14 @@ extern int in_sizeof;
 extern int in_typeof;
 
 extern struct c_switch *c_switch_stack;
+extern struct c_label_context_se *label_context_stack_se;
+extern struct c_label_context_vm *label_context_stack_vm;
 
 extern tree require_complete_type (tree);
 extern int same_translation_unit_p (tree, tree);
 extern int comptypes (tree, tree);
-extern tree c_size_in_bytes (tree);
+/* APPLE LOCAL mainline 2006-05-18 4336222 */
+extern bool c_vla_type_p (tree);
 extern bool c_mark_addressable (tree);
 extern void c_incomplete_type_error (tree, tree);
 extern tree c_type_promotes_to (tree);
@@ -500,7 +569,6 @@ extern tree build_component_ref (tree, tree);
 extern tree build_indirect_ref (tree, const char *);
 extern tree build_array_ref (tree, tree);
 extern tree build_external_ref (tree, int);
-extern void record_maybe_used_decl (tree);
 extern void pop_maybe_used (bool);
 extern struct c_expr c_expr_sizeof_expr (struct c_expr);
 extern struct c_expr c_expr_sizeof_type (struct c_type_name *);
@@ -542,6 +610,8 @@ extern tree c_finish_return (tree);
 extern tree c_finish_bc_stmt (tree *, bool);
 extern tree c_finish_goto_label (tree);
 extern tree c_finish_goto_ptr (tree);
+extern void c_begin_vm_scope (unsigned int);
+extern void c_end_vm_scope (unsigned int);
 
 /* APPLE LOCAL begin CW asm blocks */
 extern tree get_structure_offset (tree, tree);

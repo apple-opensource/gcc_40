@@ -42,8 +42,8 @@
 
 /** @file ext/pool_allocator.h
  *  This file is a GNU extension to the Standard C++ Library.
- *  You should only include this header if you are using GCC 3 or later.
  */
+
 #ifndef _POOL_ALLOCATOR_H
 #define _POOL_ALLOCATOR_H 1
 
@@ -57,6 +57,8 @@
 namespace __gnu_cxx
 {
   /**
+   *  @brief  Base class for __pool_alloc.
+   *
    *  @if maint
    *  Uses various allocators to fulfill underlying requests (and makes as
    *  few requests as possible when in default high-speed pool mode).
@@ -71,7 +73,6 @@ namespace __gnu_cxx
    *     without permanently losing part of the object.
    *
    *  @endif
-   *  (See @link Allocators allocators info @endlink for more.)
    */
     class __pool_alloc_base
     {
@@ -79,7 +80,7 @@ namespace __gnu_cxx
 
       enum { _S_align = 8 };
       enum { _S_max_bytes = 128 };
-      enum { _S_free_list_size = _S_max_bytes / _S_align };
+      enum { _S_free_list_size = (size_t)_S_max_bytes / (size_t)_S_align };
       
       union _Obj
       {
@@ -116,6 +117,7 @@ namespace __gnu_cxx
     };
 
 
+  /// @brief  class __pool_alloc.
   template<typename _Tp>
     class __pool_alloc : private __pool_alloc_base
     {

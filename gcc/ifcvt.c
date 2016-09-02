@@ -1,5 +1,6 @@
 /* If-conversion support.
-   Copyright (C) 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+   Copyright (C) 2000, 2001, 2002, 2003, 2004, 2005
+   Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -86,7 +87,7 @@ static bool life_data_ok;
 
 /* Forward references.  */
 static int count_bb_insns (basic_block);
-static int total_bb_rtx_cost (basic_block);
+static bool cheap_bb_rtx_cost_p (basic_block, int);
 static rtx first_active_insn (basic_block);
 static rtx last_active_insn (basic_block, int);
 static basic_block block_fallthru (basic_block);
@@ -109,10 +110,12 @@ static int dead_or_predicable (basic_block, basic_block, basic_block,
 			       basic_block, int);
 static void noce_emit_move_insn (rtx, rtx);
 static rtx block_has_only_trap (basic_block);
-static void mark_loop_exit_edges (void);
+/* APPLE LOCAL 4538899 mainline */
+void mark_loop_exit_edges (void);
 
 /* Sets EDGE_LOOP_EXIT flag for all loop exits.  */
-static void
+/* APPLE LOCAL 4538899 mainline */
+void
 mark_loop_exit_edges (void)
 {
   struct loops loops;
@@ -162,12 +165,12 @@ count_bb_insns (basic_block bb)
   return count;
 }
 
-/* Count the total insn_rtx_cost of non-jump active insns in BB.
-   This function returns -1, if the cost of any instruction could
-   not be estimated.  */
+/* Determine whether the total insn_rtx_cost on non-jump insns in
+   basic block BB is less than MAX_COST.  This function returns
+   false if the cost of any instruction could not be estimated.  */
 
-static int
-total_bb_rtx_cost (basic_block bb)
+static bool
+cheap_bb_rtx_cost_p (basic_block bb, int max_cost)
 {
   int count = 0;
   rtx insn = BB_HEAD (bb);
@@ -178,18 +181,34 @@ total_bb_rtx_cost (basic_block bb)
 	{
 	  int cost = insn_rtx_cost (PATTERN (insn));
 	  if (cost == 0)
-	    return -1;
+	    return false;
+
+	  /* If this instruction is the load or set of a "stack" register,
+	     such as a floating point register on x87, then the cost of
+	     speculatively executing this instruction needs to include
+	     the additional cost of popping this register off of the
+	     register stack.  */
+#ifdef STACK_REGS
+	  {
+	    rtx set = single_set (insn);
+	    if (set && STACK_REG_P (SET_DEST (set)))
+	      cost += COSTS_N_INSNS (1);
+	  }
+#endif
+
 	  count += cost;
+	  if (count >= max_cost)
+	    return false;
 	}
       else if (CALL_P (insn))
-	return -1;
+	return false;
  
       if (insn == BB_END (bb))
 	break;
       insn = NEXT_INSN (insn);
     }
 
-  return count;
+  return true;
 }
 
 /* Return the first non-jump active insn in the basic block.  */
@@ -296,6 +315,22 @@ cond_exec_process_insns (ce_if_block_t *ce_info ATTRIBUTE_UNUSED,
 	  goto insn_done;
 	}
 
+      /* APPLE LOCAL begin ARM enhance conditional insn generation */
+#ifdef TARGET_ARM
+      /* If we've got a comparison in the block, we can continue to merge
+	 provided all following insns are COND_EXEC with a condition identical
+	 to TEST.  The existing instruction is just fine in this case, no
+	 modifications needed.  Misleading name of "must_be_last" retained to 
+	 minimize changes.  */
+      /* This probably won't work on some other targets.  */
+
+      if (must_be_last
+	  && GET_CODE (PATTERN (insn)) == COND_EXEC
+	  && rtx_equal_p (COND_EXEC_TEST (PATTERN (insn)), test))
+	goto insn_done;
+#endif
+      /* APPLE LOCAL end ARM enhance conditional insn generation */
+
       /* Last insn wasn't last?  */
       if (must_be_last)
 	return FALSE;
@@ -306,6 +341,13 @@ cond_exec_process_insns (ce_if_block_t *ce_info ATTRIBUTE_UNUSED,
 	    return FALSE;
 	  must_be_last = TRUE;
 	}
+
+      /* APPLE LOCAL begin ARM make calls predicable */
+      /* Calls with NORETURN notes cannot easily be conditionally executed,
+	 since all insns following such calls have been removed as dead. */
+      if (CALL_P (insn) && find_reg_note (insn, REG_NORETURN,  NULL_RTX))
+	return FALSE;
+      /* APPLE LOCAL end ARM make calls predicable */
 
       /* Now build the conditional form of the instruction.  */
       pattern = PATTERN (insn);
@@ -378,9 +420,33 @@ cond_exec_get_condition (rtx jump)
   return cond;
 }
 
+/* APPLE LOCAL begin ARM enhance conditional insn generation */
+/* Test whether two conditional branches have the same destination.  We've
+   checked elsewhere that the conditions are compatible; if one is
+   reversed, so must the other be.  */
+static bool 
+cond_exec_branch_targets_equiv (rtx insn1, rtx insn2)
+{
+  rtx cond1, cond2;
+  if (!any_condjump_p (insn1) || !any_condjump_p (insn2))
+    return false;
+  cond1 = SET_SRC (pc_set (insn1));
+  cond2 = SET_SRC (pc_set (insn2));
+  if (rtx_equal_p (XEXP (cond1, 1), XEXP (cond2, 1))
+      && rtx_equal_p (XEXP (cond1, 2), XEXP (cond2, 2)))
+    return true;
+  return false;
+}
+
 /* Given a simple IF-THEN or IF-THEN-ELSE block, attempt to convert it
    to conditional execution.  Return TRUE if we were successful at
    converting the block.  */
+/* In addition to the above, we're locally handling the case where multiple
+   && or || blocks precede the THEN, but we cannot convert the THEN block
+   for some reason (e.g. it has multiple successors, or THEN and ELSE do
+   not join.)  We can still convert and merge the && or || blocks.
+   This case is indicated by ce_info->then_bb==NULL.  Heavy modifications 
+   in this routine.  */
 
 static int
 cond_exec_process_if_block (ce_if_block_t * ce_info,
@@ -390,8 +456,8 @@ cond_exec_process_if_block (ce_if_block_t * ce_info,
   basic_block then_bb = ce_info->then_bb;	/* THEN */
   basic_block else_bb = ce_info->else_bb;	/* ELSE or NULL */
   rtx test_expr;		/* expression in IF_THEN_ELSE that is tested */
-  rtx then_start;		/* first insn in THEN block */
-  rtx then_end;			/* last insn + 1 in THEN block */
+  rtx then_start = NULL_RTX;	/* first insn in THEN block */
+  rtx then_end = NULL_RTX;	/* last insn + 1 in THEN block */
   rtx else_start = NULL_RTX;	/* first insn in ELSE block or NULL */
   rtx else_end = NULL_RTX;	/* last insn + 1 in ELSE block */
   int max;			/* max # of insns to convert.  */
@@ -400,7 +466,7 @@ cond_exec_process_if_block (ce_if_block_t * ce_info,
   rtx false_expr;		/* test for then block insns */
   rtx true_prob_val;		/* probability of else block */
   rtx false_prob_val;		/* probability of then block */
-  int n_insns;
+  int n_insns = 0;
   enum rtx_code false_code;
 
   /* If test is comprised of && or || elements, and we've failed at handling
@@ -431,21 +497,24 @@ cond_exec_process_if_block (ce_if_block_t * ce_info,
   /* Collect the bounds of where we're to search, skipping any labels, jumps
      and notes at the beginning and end of the block.  Then count the total
      number of insns and see if it is small enough to convert.  */
-  then_start = first_active_insn (then_bb);
-  then_end = last_active_insn (then_bb, TRUE);
-  n_insns = ce_info->num_then_insns = count_bb_insns (then_bb);
-  max = MAX_CONDITIONAL_EXECUTE;
-
-  if (else_bb)
+  if (then_bb)
     {
-      max *= 2;
-      else_start = first_active_insn (else_bb);
-      else_end = last_active_insn (else_bb, TRUE);
-      n_insns += ce_info->num_else_insns = count_bb_insns (else_bb);
-    }
+      then_start = first_active_insn (then_bb);
+      then_end = last_active_insn (then_bb, TRUE);
+      n_insns = ce_info->num_then_insns = count_bb_insns (then_bb);
+      max = MAX_CONDITIONAL_EXECUTE;
 
-  if (n_insns > max)
-    return FALSE;
+      if (else_bb)
+	{
+	  max *= 2;
+	  else_start = first_active_insn (else_bb);
+	  else_end = last_active_insn (else_bb, TRUE);
+	  n_insns += ce_info->num_else_insns = count_bb_insns (else_bb);
+	}
+
+      if (n_insns > max)
+	return FALSE;
+    }
 
   /* Map test_expr/test_jump into the appropriate MD tests to use on
      the conditionally executed code.  */
@@ -493,13 +562,24 @@ cond_exec_process_if_block (ce_if_block_t * ce_info,
 	  rtx start, end;
 	  rtx t, f;
 	  enum rtx_code f_code;
+	  int mod_ok = 0;
 
 	  bb = block_fallthru (bb);
 	  start = first_active_insn (bb);
 	  end = last_active_insn (bb, TRUE);
+
+	  /* If the condition at the next block is same as this one, and they
+	     share a target, we can conditionally redefine CC within the block. 
+	     This should work on targets with a single CC register and conditional
+	     compares. */
+	  t = cond_exec_get_condition (BB_END (bb));
+	  if (t && rtx_equal_p (t, true_expr) 
+	        && cond_exec_branch_targets_equiv (BB_END (bb), BB_END (test_bb)))
+	    mod_ok = 1;
+
 	  if (start
 	      && ! cond_exec_process_insns (ce_info, start, end, false_expr,
-					    false_prob_val, FALSE))
+					    false_prob_val, mod_ok))
 	    goto fail;
 
 	  /* If the conditional jump is more than just a conditional jump, then
@@ -517,15 +597,21 @@ cond_exec_process_if_block (ce_if_block_t * ce_info,
 	    goto fail;
 
 	  f = gen_rtx_fmt_ee (f_code, GET_MODE (t), XEXP (t, 0), XEXP (t, 1));
+	  /* The ORs and ANDs in the following are reversed from mainline.  The true_expr
+	     is the condition that means the 'else' block is executed, i.e. the branch
+	     is taken.  In an && that means any of the conditions at the ends of the &&
+	     blocks are true, so we want to OR them.  Etc.  At least that's my understanding; 
+	     the only other target that uses this much is FRV, and it may work differently
+	     somehow.  But my current opinion is, this is a bug in mainline. */
 	  if (ce_info->and_and_p)
-	    {
-	      t = gen_rtx_AND (GET_MODE (t), true_expr, t);
-	      f = gen_rtx_IOR (GET_MODE (t), false_expr, f);
-	    }
-	  else
 	    {
 	      t = gen_rtx_IOR (GET_MODE (t), true_expr, t);
 	      f = gen_rtx_AND (GET_MODE (t), false_expr, f);
+	    }
+	  else
+	    {
+	      f = gen_rtx_IOR (GET_MODE (t), true_expr, f);
+	      t = gen_rtx_AND (GET_MODE (t), false_expr, t);
 	    }
 
 	  /* If the machine description needs to modify the tests, such as
@@ -543,6 +629,13 @@ cond_exec_process_if_block (ce_if_block_t * ce_info,
 	  false_expr = f;
 	}
       while (bb != last_test_bb);
+      /* If tests from several blocks were merged, change the last branch to use the
+	 merged tests, which may of course be invalid.  We need do this only in the
+	 &&-only case, as the branch will be removed if we have a then block. */
+      if (!then_bb && !rtx_equal_p (true_expr, test_expr))
+	if (any_condjump_p (BB_END (bb)))
+	    validate_change (BB_END (bb), &XEXP (SET_SRC (pc_set (BB_END (bb))), 0), 
+			 true_expr, 1);
     }
 
   /* For IF-THEN-ELSE blocks, we don't allow modifications of the test
@@ -552,7 +645,7 @@ cond_exec_process_if_block (ce_if_block_t * ce_info,
   /* Go through the THEN and ELSE blocks converting the insns if possible
      to conditional execution.  */
 
-  if (then_end
+  if (then_bb && then_end
       && (! false_expr
 	  || ! cond_exec_process_insns (ce_info, then_start, then_end,
 					false_expr, false_prob_val,
@@ -599,6 +692,7 @@ cond_exec_process_if_block (ce_if_block_t * ce_info,
   cancel_changes (0);
   return FALSE;
 }
+/* APPLE LOCAL end ARM enhance conditional insn generation */
 
 /* Used by noce_process_if_block to communicate with its subroutines.
 
@@ -1212,6 +1306,7 @@ noce_try_cmove_arith (struct noce_if_info *if_info)
   rtx a = if_info->a;
   rtx b = if_info->b;
   rtx x = if_info->x;
+  rtx orig_a, orig_b;
   rtx insn_a, insn_b;
   rtx tmp, target;
   int is_mem = 0;
@@ -1287,6 +1382,9 @@ noce_try_cmove_arith (struct noce_if_info *if_info)
 
   start_sequence ();
 
+  orig_a = a;
+  orig_b = b;
+
   /* If either operand is complex, load it into a register first.
      The best way to do this is to copy the original insn.  In this
      way we preserve any clobbers etc that the insn may have had.
@@ -1318,7 +1416,7 @@ noce_try_cmove_arith (struct noce_if_info *if_info)
     }
   if (! general_operand (b, GET_MODE (b)))
     {
-      rtx set;
+      rtx set, last;
 
       if (no_new_pseudos)
 	goto end_seq_and_fail;
@@ -1326,9 +1424,7 @@ noce_try_cmove_arith (struct noce_if_info *if_info)
       if (is_mem)
 	{
           tmp = gen_reg_rtx (GET_MODE (b));
-	  tmp = emit_insn (gen_rtx_SET (VOIDmode,
-				  	tmp,
-					b));
+	  tmp = gen_rtx_SET (VOIDmode, tmp, b);
 	}
       else if (! insn_b)
 	goto end_seq_and_fail;
@@ -1338,8 +1434,22 @@ noce_try_cmove_arith (struct noce_if_info *if_info)
 	  tmp = copy_rtx (insn_b);
 	  set = single_set (tmp);
 	  SET_DEST (set) = b;
-	  tmp = emit_insn (PATTERN (tmp));
+	  tmp = PATTERN (tmp);
 	}
+
+      /* If insn to set up A clobbers any registers B depends on, try to
+	 swap insn that sets up A with the one that sets up B.  If even
+	 that doesn't help, punt.  */
+      last = get_last_insn ();
+      if (last && modified_in_p (orig_b, last))
+	{
+	  tmp = emit_insn_before (tmp, get_insns ());
+	  if (modified_in_p (orig_a, tmp))
+	    goto end_seq_and_fail;
+	}
+      else
+	tmp = emit_insn (tmp);
+
       if (recog_memoized (tmp) < 0)
 	goto end_seq_and_fail;
     }
@@ -2151,7 +2261,10 @@ process_if_block (struct ce_if_block * ce_info)
       if (cond_exec_process_if_block (ce_info, TRUE))
 	return TRUE;
 
-      if (ce_info->num_multiple_test_blocks)
+      /* APPLE LOCAL begin ARM enhance conditional insn generation */
+      /* The &&-only case can't do anything useful here, so don't try. */
+      if (ce_info->num_multiple_test_blocks && ce_info->then_bb)
+      /* APPLE LOCAL end ARM enhance conditional insn generation */
 	{
 	  cancel_changes (0);
 
@@ -2445,8 +2558,6 @@ find_if_block (struct ce_if_block * ce_info)
   basic_block then_bb = ce_info->then_bb;
   basic_block else_bb = ce_info->else_bb;
   basic_block join_bb = NULL_BLOCK;
-  int then_predecessors;
-  int else_predecessors;
   edge cur_edge;
   basic_block next;
   edge_iterator ei;
@@ -2511,34 +2622,31 @@ find_if_block (struct ce_if_block * ce_info)
 	}
     }
 
-  /* Count the number of edges the THEN and ELSE blocks have.  */
-  then_predecessors = 0;
-  FOR_EACH_EDGE (cur_edge, ei, then_bb->preds)
-    {
-      then_predecessors++;
-      if (cur_edge->flags & EDGE_COMPLEX)
-	return FALSE;
-    }
-
-  else_predecessors = 0;
-  FOR_EACH_EDGE (cur_edge, ei, else_bb->preds)
-    {
-      else_predecessors++;
-      if (cur_edge->flags & EDGE_COMPLEX)
-	return FALSE;
-    }
-
+  /* APPLE LOCAL begin ARM enhance conditional insn generation */
   /* The THEN block of an IF-THEN combo must have exactly one predecessor,
      other than any || blocks which jump to the THEN block.  */
-  if ((then_predecessors - ce_info->num_or_or_blocks) != 1)
-    return FALSE;
+  if ((EDGE_COUNT (then_bb->preds) - ce_info->num_or_or_blocks) != 1)
+    goto combine_and_and_only;
+    
+  /* The edges of the THEN and ELSE blocks cannot have complex edges.  */
+  FOR_EACH_EDGE (cur_edge, ei, then_bb->preds)
+    {
+      if (cur_edge->flags & EDGE_COMPLEX)
+	goto combine_and_and_only;
+    }
+
+  FOR_EACH_EDGE (cur_edge, ei, else_bb->preds)
+    {
+      if (cur_edge->flags & EDGE_COMPLEX)
+	goto combine_and_and_only;
+    }
 
   /* The THEN block of an IF-THEN combo must have zero or one successors.  */
   if (EDGE_COUNT (then_bb->succs) > 0
       && (EDGE_COUNT (then_bb->succs) > 1
           || (EDGE_SUCC (then_bb, 0)->flags & EDGE_COMPLEX)
 	  || (flow2_completed && tablejump_p (BB_END (then_bb), NULL, NULL))))
-    return FALSE;
+    goto combine_and_and_only;
 
   /* If the THEN block has no successors, conditional execution can still
      make a conditional call.  Don't do this unless the ELSE block has
@@ -2560,13 +2668,13 @@ find_if_block (struct ce_if_block * ce_info)
 	  if (last_insn
 	      && JUMP_P (last_insn)
 	      && ! simplejump_p (last_insn))
-	    return FALSE;
+	    goto combine_and_and_only;
 
 	  join_bb = else_bb;
 	  else_bb = NULL_BLOCK;
 	}
       else
-	return FALSE;
+	goto combine_and_and_only;
     }
 
   /* If the THEN block's successor is the other edge out of the TEST block,
@@ -2587,30 +2695,51 @@ find_if_block (struct ce_if_block * ce_info)
 	   && ! (flow2_completed && tablejump_p (BB_END (else_bb), NULL, NULL)))
     join_bb = EDGE_SUCC (else_bb, 0)->dest;
 
-  /* Otherwise it is not an IF-THEN or IF-THEN-ELSE combination.  */
+  /* Otherwise it is not an IF-THEN or IF-THEN-ELSE combination. */
+  else
+    goto combine_and_and_only;
+ 
+  /* Fallthrough means one of the recognized cases above matched. */
+  goto if_block_found;
+
+  /* This is not a recognizable if-then-else for some reason.  If we have multiple 
+     && blocks, we can still try to combine them.  This case is indicated by marking
+     everything else null.  */
+combine_and_and_only:;
+  if (ce_info->num_and_and_blocks || ce_info->num_or_or_blocks)
+    {
+      join_bb = else_bb = NULL_BLOCK;
+      then_bb = ce_info->then_bb = NULL_BLOCK;
+    }
   else
     return FALSE;
 
+if_block_found:;
   num_possible_if_blocks++;
 
   if (dump_file)
     {
       fprintf (dump_file,
-	       "\nIF-THEN%s block found, pass %d, start block %d "
-	       "[insn %d], then %d [%d]",
+	       "\nIF%s%s block found, pass %d, start block %d "
+	       "[insn %d]",
+	       (then_bb) ? "-THEN" : "",
 	       (else_bb) ? "-ELSE" : "",
 	       ce_info->pass,
 	       test_bb->index,
-	       BB_HEAD (test_bb) ? (int)INSN_UID (BB_HEAD (test_bb)) : -1,
-	       then_bb->index,
-	       BB_HEAD (then_bb) ? (int)INSN_UID (BB_HEAD (then_bb)) : -1);
+	       BB_HEAD (test_bb) ? (int)INSN_UID (BB_HEAD (test_bb)) : -1);
+
+      if (then_bb)
+	fprintf (dump_file, ", then %d [%d]",
+		 then_bb->index,
+		 BB_HEAD (then_bb) ? (int)INSN_UID (BB_HEAD (then_bb)) : -1);
 
       if (else_bb)
 	fprintf (dump_file, ", else %d [%d]",
 		 else_bb->index,
 		 BB_HEAD (else_bb) ? (int)INSN_UID (BB_HEAD (else_bb)) : -1);
 
-      fprintf (dump_file, ", join %d [%d]",
+      if (join_bb)
+	fprintf (dump_file, ", join %d [%d]",
 	       join_bb->index,
 	       BB_HEAD (join_bb) ? (int)INSN_UID (BB_HEAD (join_bb)) : -1);
 
@@ -2631,20 +2760,25 @@ find_if_block (struct ce_if_block * ce_info)
      first condition for free, since we've already asserted that there's a
      fallthru edge from IF to THEN.  Likewise for the && and || blocks, since
      we checked the FALLTHRU flag, those are already adjacent to the last IF
-     block.  */
+     block.  (When then_bb is null, we are only looking at the && blocks, which
+     were already verified.)  */
   /* ??? As an enhancement, move the ELSE block.  Have to deal with
      BLOCK notes, if by no other means than aborting the merge if they
      exist.  Sticky enough I don't want to think about it now.  */
-  next = then_bb;
-  if (else_bb && (next = next->next_bb) != else_bb)
-    return FALSE;
-  if ((next = next->next_bb) != join_bb && join_bb != EXIT_BLOCK_PTR)
+  if (then_bb)
     {
-      if (else_bb)
-	join_bb = NULL;
-      else
+      next = then_bb;
+      if (else_bb && (next = next->next_bb) != else_bb)
 	return FALSE;
+      if ((next = next->next_bb) != join_bb && join_bb != EXIT_BLOCK_PTR)
+	{
+	  if (else_bb)
+	    join_bb = NULL;
+	  else
+	    return FALSE;
+	}
     }
+  /* APPLE LOCAL end ARM enhance conditional insn generation */
 
   /* Do the real work.  */
   ce_info->else_bb = else_bb;
@@ -2859,7 +2993,7 @@ find_if_case_1 (basic_block test_bb, edge then_edge, edge else_edge)
 {
   basic_block then_bb = then_edge->dest;
   basic_block else_bb = else_edge->dest, new_bb;
-  int then_bb_index, bb_cost;
+  int then_bb_index;
 
   /* If we are partitioning hot/cold basic blocks, we don't want to
      mess up unconditional or indirect jumps that cross between hot
@@ -2902,8 +3036,13 @@ find_if_case_1 (basic_block test_bb, edge then_edge, edge else_edge)
 	     test_bb->index, then_bb->index);
 
   /* THEN is small.  */
-  bb_cost = total_bb_rtx_cost (then_bb);
-  if (bb_cost < 0 || bb_cost >= COSTS_N_INSNS (BRANCH_COST))
+  /* APPLE LOCAL begin 4203984 */
+#ifdef TARGET_POWERPC
+  if (! cheap_bb_rtx_cost_p (then_bb, COSTS_N_INSNS (BRANCH_COST + 1)))
+#else
+  if (! cheap_bb_rtx_cost_p (then_bb, COSTS_N_INSNS (BRANCH_COST)))
+#endif
+  /* APPLE LOCAL end 4203984 */
     return FALSE;
 
   /* Registers set are dead, or are predicable.  */
@@ -2914,11 +3053,26 @@ find_if_case_1 (basic_block test_bb, edge then_edge, edge else_edge)
   /* Conversion went ok, including moving the insns and fixing up the
      jump.  Adjust the CFG to match.  */
 
-  bitmap_operation (test_bb->global_live_at_end,
-		    else_bb->global_live_at_start,
-		    then_bb->global_live_at_end, BITMAP_IOR);
+  bitmap_ior (test_bb->global_live_at_end,
+	      else_bb->global_live_at_start,
+	      then_bb->global_live_at_end);
 
-  new_bb = redirect_edge_and_branch_force (FALLTHRU_EDGE (test_bb), else_bb);
+
+  /* We can avoid creating a new basic block if then_bb is immediately
+     followed by else_bb, i.e. deleting then_bb allows test_bb to fall
+     thru to else_bb.  */
+
+  if (then_bb->next_bb == else_bb
+      && then_bb->prev_bb == test_bb
+      && else_bb != EXIT_BLOCK_PTR)
+    {
+      redirect_edge_succ (FALLTHRU_EDGE (test_bb), else_bb);
+      new_bb = 0;
+    }
+  else
+    new_bb = redirect_edge_and_branch_force (FALLTHRU_EDGE (test_bb),
+                                             else_bb);
+
   then_bb_index = then_bb->index;
   delete_basic_block (then_bb);
 
@@ -2950,7 +3104,6 @@ find_if_case_2 (basic_block test_bb, edge then_edge, edge else_edge)
   basic_block then_bb = then_edge->dest;
   basic_block else_bb = else_edge->dest;
   edge else_succ;
-  int bb_cost;
   rtx note;
 
   /* If we are partitioning hot/cold basic blocks, we don't want to
@@ -3007,8 +3160,13 @@ find_if_case_2 (basic_block test_bb, edge then_edge, edge else_edge)
 	     test_bb->index, else_bb->index);
 
   /* ELSE is small.  */
-  bb_cost = total_bb_rtx_cost (else_bb);
-  if (bb_cost < 0 || bb_cost >= COSTS_N_INSNS (BRANCH_COST))
+  /* APPLE LOCAL begin 4203984 */
+#ifdef TARGET_POWERPC
+  if (! cheap_bb_rtx_cost_p (else_bb, COSTS_N_INSNS (BRANCH_COST + 1)))
+#else
+  if (! cheap_bb_rtx_cost_p (else_bb, COSTS_N_INSNS (BRANCH_COST)))
+#endif
+  /* APPLE LOCAL end 4203984 */
     return FALSE;
 
   /* Registers set are dead, or are predicable.  */
@@ -3018,9 +3176,9 @@ find_if_case_2 (basic_block test_bb, edge then_edge, edge else_edge)
   /* Conversion went ok, including moving the insns and fixing up the
      jump.  Adjust the CFG to match.  */
 
-  bitmap_operation (test_bb->global_live_at_end,
-		    then_bb->global_live_at_start,
-		    else_bb->global_live_at_end, BITMAP_IOR);
+  bitmap_ior (test_bb->global_live_at_end,
+	      then_bb->global_live_at_start,
+	      else_bb->global_live_at_end);
 
   delete_basic_block (else_bb);
 
@@ -3130,10 +3288,9 @@ dead_or_predicable (basic_block test_bb, basic_block merge_bb,
 	 that any registers modified are dead at the branch site.  */
 
       rtx insn, cond, prev;
-      regset_head merge_set_head, tmp_head, test_live_head, test_set_head;
       regset merge_set, tmp, test_live, test_set;
       struct propagate_block_info *pbi;
-      int i, fail = 0;
+      unsigned i, fail = 0;
       bitmap_iterator bi;
 
       /* Check for no calls or trapping operations.  */
@@ -3172,10 +3329,10 @@ dead_or_predicable (basic_block test_bb, basic_block merge_bb,
 	   TEST_SET  = set of registers set between EARLIEST and the
 		       end of the block.  */
 
-      tmp = INITIALIZE_REG_SET (tmp_head);
-      merge_set = INITIALIZE_REG_SET (merge_set_head);
-      test_live = INITIALIZE_REG_SET (test_live_head);
-      test_set = INITIALIZE_REG_SET (test_set_head);
+      tmp = ALLOC_REG_SET (&reg_obstack);
+      merge_set = ALLOC_REG_SET (&reg_obstack);
+      test_live = ALLOC_REG_SET (&reg_obstack);
+      test_set = ALLOC_REG_SET (&reg_obstack);
 
       /* ??? bb->local_set is only valid during calculate_global_regs_live,
 	 so we must recompute usage for MERGE_BB.  Not so bad, I suppose,
@@ -3217,14 +3374,9 @@ dead_or_predicable (basic_block test_bb, basic_block merge_bb,
 	   TEST_SET & merge_bb->global_live_at_start
 	 are empty.  */
 
-      bitmap_operation (tmp, test_set, test_live, BITMAP_IOR);
-      bitmap_operation (tmp, tmp, merge_set, BITMAP_AND);
-      if (bitmap_first_set_bit (tmp) >= 0)
-	fail = 1;
-
-      bitmap_operation (tmp, test_set, merge_bb->global_live_at_start,
-			BITMAP_AND);
-      if (bitmap_first_set_bit (tmp) >= 0)
+      if (bitmap_intersect_p (test_set, merge_set)
+	  || bitmap_intersect_p (test_live, merge_set)
+	  || bitmap_intersect_p (test_set, merge_bb->global_live_at_start))
 	fail = 1;
 
       FREE_REG_SET (tmp);

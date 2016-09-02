@@ -52,8 +52,8 @@ static void init_vector_keywords (cpp_reader *pfile);
    whether or not new function declarations receive a longcall
    attribute by default.  */
 
-#define SYNTAX_ERROR(msgid) do {			\
-  warning (msgid);					\
+#define SYNTAX_ERROR(gmsgid) do {			\
+  warning (gmsgid);					\
   warning ("ignoring malformed #pragma longcall");	\
   return;						\
 } while (0)
@@ -245,22 +245,22 @@ rs6000_cpu_cpp_builtins (cpp_reader *pfile)
       builtin_define ("__bool=__attribute__((altivec(bool__))) unsigned");
 
       /* APPLE LOCAL begin AltiVec */
-      builtin_define ("vector=vector");
-      builtin_define ("pixel=pixel");
-      builtin_define ("_Bool=_Bool"); 
-      builtin_define ("bool=bool");
-      init_vector_keywords (pfile);
-
-      /* Indicate that the compiler supports Apple AltiVec syntax,
-	 including context-sensitive keywords.  */
       if (rs6000_altivec_pim)
 	{
+	  builtin_define ("vector=vector");
+	  builtin_define ("pixel=pixel");
+	  builtin_define ("_Bool=_Bool"); 
+	  builtin_define ("bool=bool");
+	  init_vector_keywords (pfile);
+	  
+	  /* Indicate that the compiler supports Apple AltiVec syntax,
+	     including context-sensitive keywords.  */
 	  builtin_define ("__APPLE_ALTIVEC__");
 	  builtin_define ("vec_step(T)=(sizeof (__typeof__(T)) / sizeof (__typeof__(T) __attribute__((altivec(element__)))))");
+      
+	  /* Enable context-sensitive macros.  */
+	  cpp_get_callbacks (pfile)->macro_to_expand = rs6000_macro_to_expand;
 	}
-
-      /* Enable context-sensitive macros.  */
-      cpp_get_callbacks (pfile)->macro_to_expand = rs6000_macro_to_expand;
       /* APPLE LOCAL end AltiVec */
     }
   if (TARGET_SPE)

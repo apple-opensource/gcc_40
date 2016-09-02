@@ -1,6 +1,6 @@
 /* Process declarations and variables for C++ compiler.
    Copyright (C) 1988, 1992, 1993, 1994, 1995, 1996, 1997, 1998,
-   1999, 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+   1999, 2000, 2001, 2002, 2003, 2004, 2005  Free Software Foundation, Inc.
    Hacked by Michael Tiemann (tiemann@cygnus.com)
 
 This file is part of GCC.
@@ -48,6 +48,7 @@ Boston, MA 02111-1307, USA.  */
 #include "tree-mudflap.h"
 #include "cgraph.h"
 #include "tree-inline.h"
+#include "c-pragma.h"
 
 extern cpp_reader *parse_in;
 
@@ -63,9 +64,7 @@ typedef struct priority_info_s {
 } *priority_info;
 
 static void mark_vtable_entries (tree);
-static void grok_function_init (tree, tree);
 static bool maybe_emit_vtables (tree);
-static tree build_anon_union_vars (tree);
 static bool acceptable_java_type (tree);
 static tree start_objects (int, int);
 static void finish_objects (int, int, tree);
@@ -157,7 +156,7 @@ cp_build_parm_decl (tree name, tree type)
 /* Returns a PARM_DECL for a parameter of the indicated TYPE, with the
    indicated NAME.  */
 
-tree
+static tree
 build_artificial_parm (tree name, tree type)
 {
   tree parm = cp_build_parm_decl (name, type);
@@ -299,7 +298,7 @@ grokclassfn (tree ctype, tree function, enum overload_flags flags,
       this_quals |= TYPE_QUAL_CONST;
       qual_type = cp_build_qualified_type (type, this_quals);
       parm = build_artificial_parm (this_identifier, qual_type);
-      c_apply_type_quals_to_decl (this_quals, parm);
+      cp_apply_type_quals_to_decl (this_quals, parm);
       TREE_CHAIN (parm) = DECL_ARGUMENTS (function);
       DECL_ARGUMENTS (function) = parm;
     }
@@ -417,8 +416,6 @@ delete_sanity (tree exp, tree size, bool doing_vec, int use_global_delete)
       TREE_SIDE_EFFECTS (t) = 1;
       return t;
     }
-
-  exp = convert_from_reference (exp);
 
   /* An array can't have been allocated by new, so complain.  */
   if (TREE_CODE (exp) == VAR_DECL
@@ -628,10 +625,10 @@ check_classfn (tree ctype, tree function, tree template_parms)
       VEC(tree) *methods = CLASSTYPE_METHOD_VEC (ctype);
       tree fndecls, fndecl = 0;
       bool is_conv_op;
-      bool pop_p;
+      tree pushed_scope;
       const char *format = NULL;
       
-      pop_p = push_scope (ctype);
+      pushed_scope = push_scope (ctype);
       for (fndecls = VEC_index (tree, methods, ix);
 	   fndecls; fndecls = OVL_NEXT (fndecls))
 	{
@@ -670,11 +667,11 @@ check_classfn (tree ctype, tree function, tree template_parms)
 		      == DECL_TI_TEMPLATE (fndecl))))
 	    break;
 	}
-      if (pop_p)
-	pop_scope (ctype);
+      if (pushed_scope)
+	pop_scope (pushed_scope);
       if (fndecls)
 	return OVL_CURRENT (fndecls);
-      error ("prototype for `%#D' does not match any in class `%T'",
+      error ("prototype for %q#D does not match any in class %qT",
 	     function, ctype);
       is_conv_op = DECL_CONV_FN_P (fndecl);
 
@@ -831,11 +828,11 @@ grokfield (const cp_declarator *declarator,
 
   if (!declspecs->any_specifiers_p
       && declarator->kind == cdk_id
-      && TREE_CODE (declarator->u.id.name) == SCOPE_REF
-      && (TREE_CODE (TREE_OPERAND (declarator->u.id.name, 1)) 
-	  == IDENTIFIER_NODE))
+      && declarator->u.id.qualifying_scope 
+      && TREE_CODE (declarator->u.id.unqualified_name) == IDENTIFIER_NODE)
     /* Access declaration */
-    return do_class_using_decl (declarator->u.id.name);
+    return do_class_using_decl (declarator->u.id.qualifying_scope,
+				declarator->u.id.unqualified_name);
 
   if (init
       && TREE_CODE (init) == TREE_LIST
@@ -880,7 +877,16 @@ grokfield (const cp_declarator *declarator,
 	value = push_template_decl (value);
 
       if (attrlist)
-	cplus_decl_attributes (&value, attrlist, 0);
+	{
+	  /* Avoid storing attributes in template parameters:
+	     tsubst is not ready to handle them.  */
+	  tree type = TREE_TYPE (value);
+	  if (TREE_CODE (type) == TEMPLATE_TYPE_PARM
+	      || TREE_CODE (type) == BOUND_TEMPLATE_TEMPLATE_PARM)
+	    sorry ("applying attributes to template parameters is not implemented");
+	  else
+	    cplus_decl_attributes (&value, attrlist, 0);
+	}
 
       return value;
     }
@@ -898,8 +904,11 @@ grokfield (const cp_declarator *declarator,
     {
       if (TREE_CODE (value) == FUNCTION_DECL)
 	{
-	  grok_function_init (value, init);
-	  init = NULL_TREE;
+	  /* Initializers for functions are rejected early in the parser.
+	     If we get here, it must be a pure specifier for a method.  */
+	  gcc_assert (TREE_CODE (TREE_TYPE (value)) == METHOD_TYPE);
+	  gcc_assert (error_operand_p (init) || integer_zerop (init));
+	  DECL_PURE_VIRTUAL_P (value) = 1;
 	}
       else if (pedantic && TREE_CODE (value) != VAR_DECL)
 	/* Already complained in grokdeclarator.  */
@@ -918,12 +927,11 @@ grokfield (const cp_declarator *declarator,
 
 	  if (!processing_template_decl)
 	    {
-	      if (TREE_CODE (init) == CONST_DECL)
-		init = DECL_INITIAL (init);
-	      else if (TREE_READONLY_DECL_P (init))
-		init = decl_constant_value (init);
-	      else if (TREE_CODE (init) == CONSTRUCTOR)
+	      if (TREE_CODE (init) == CONSTRUCTOR)
 		init = digest_init (TREE_TYPE (value), init, (tree *)0);
+	      else
+		init = integral_constant_value (init);
+	      
 	      if (init != error_mark_node && ! TREE_CONSTANT (init))
 		{
 		  /* We can allow references to things that are effectively
@@ -961,7 +969,7 @@ grokfield (const cp_declarator *declarator,
 
     case FIELD_DECL:
       if (asmspec)
-	error ("`asm' specifiers are not permitted on non-static data members");
+	error ("%<asm%> specifiers are not permitted on non-static data members");
       if (DECL_INITIAL (value) == error_mark_node)
 	init = error_mark_node;
       cp_finish_decl (value, init, NULL_TREE, flags);
@@ -1047,55 +1055,6 @@ grokbitfield (const cp_declarator *declarator,
   return value;
 }
 
-/* When a function is declared with an initializer,
-   do the right thing.  Currently, there are two possibilities:
-
-   class B
-   {
-    public:
-     // initialization possibility #1.
-     virtual void f () = 0;
-     int g ();
-   };
-   
-   class D1 : B
-   {
-    public:
-     int d1;
-     // error, no f ();
-   };
-   
-   class D2 : B
-   {
-    public:
-     int d2;
-     void f ();
-   };
-   
-   class D3 : B
-   {
-    public:
-     int d3;
-     // initialization possibility #2
-     void f () = B::f;
-   };
-
-*/
-
-static void
-grok_function_init (tree decl, tree init)
-{
-  /* An initializer for a function tells how this function should
-     be inherited.  */
-  tree type = TREE_TYPE (decl);
-
-  if (TREE_CODE (type) == FUNCTION_TYPE)
-    error ("initializer specified for non-member function %qD", decl);
-  else if (integer_zerop (init))
-    DECL_PURE_VIRTUAL_P (decl) = 1;
-  else
-    error ("invalid initializer for virtual method %qD", decl);
-}
 
 void
 cplus_decl_attributes (tree *decl, tree attributes, int flags)
@@ -1112,14 +1071,13 @@ cplus_decl_attributes (tree *decl, tree attributes, int flags)
     SET_IDENTIFIER_TYPE_VALUE (DECL_NAME (*decl), TREE_TYPE (*decl));
 }
 
-/* Walks through the namespace- or function-scope anonymous union OBJECT,
-   building appropriate ALIAS_DECLs.  Returns one of the fields for use in
-   the mangled name.  */
+/* Walks through the namespace- or function-scope anonymous union
+   OBJECT, with the indicated TYPE, building appropriate ALIAS_DECLs.
+   Returns one of the fields for use in the mangled name.  */
 
 static tree
-build_anon_union_vars (tree object)
+build_anon_union_vars (tree type, tree object)
 {
-  tree type = TREE_TYPE (object);
   tree main_decl = NULL_TREE;
   tree field;
 
@@ -1167,7 +1125,7 @@ build_anon_union_vars (tree object)
 	  decl = pushdecl (decl);
 	}
       else if (ANON_AGGR_TYPE_P (TREE_TYPE (field)))
-	decl = build_anon_union_vars (ref);
+	decl = build_anon_union_vars (TREE_TYPE (field), ref);
       else
 	decl = 0;
 
@@ -1207,7 +1165,7 @@ finish_anon_union (tree anon_union_decl)
       return;
     }
 
-  main_decl = build_anon_union_vars (anon_union_decl);
+  main_decl = build_anon_union_vars (type, anon_union_decl);
   if (main_decl == NULL_TREE)
     {
       warning ("anonymous union with no members");
@@ -1675,31 +1633,33 @@ determine_visibility (tree decl)
 	  DECL_VISIBILITY_SPECIFIED (decl) = 1;
 	}
       else if (TREE_CODE (decl) == FUNCTION_DECL
+	       /* APPLE LOCAL begin mainline */
+	       && (! DECL_LANG_SPECIFIC (decl)
+		   || ! DECL_EXPLICIT_INSTANTIATION (decl))
+	       /* APPLE LOCAL end mainline */
 	       && DECL_DECLARED_INLINE_P (decl)
 	       && visibility_options.inlines_hidden)
 	{
 	  DECL_VISIBILITY (decl) = VISIBILITY_HIDDEN;
-	  DECL_VISIBILITY_SPECIFIED (decl) = 1;
+	  /* APPLE LOCAL mainline 4.2 2006-07-21 4311680 */
+	  /* Don't set DECL_VISIBILITY_SPECIFIED here.  */
 	}
       else if (CLASSTYPE_VISIBILITY_SPECIFIED (class_type))
 	{
 	  DECL_VISIBILITY (decl) = CLASSTYPE_VISIBILITY (class_type);
 	  DECL_VISIBILITY_SPECIFIED (decl) = 1;
 	}
-      /* If no explicit visibility information has been provided for
-	 this class, some targets require that class data be
-	 exported.  */
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
+      /* APPLE LOCAL begin ms tinfo compat 4230099 */
       else if (TREE_CODE (decl) == VAR_DECL
-	       && targetm.cxx.export_class_data ()
-	       && (DECL_TINFO_P (decl)
-		   || (DECL_VTABLE_OR_VTT_P (decl)
-		       /* Construction virtual tables are not emitted
-			  because they cannot be referred to from other
-			  object files; their name is not standardized by
-			  the ABI.  */
-		       && !DECL_CONSTRUCTION_VTABLE_P (decl))))
+	       && flag_visibility_ms_compat
+	       && DECL_TINFO_P (decl))
 	DECL_VISIBILITY (decl) = VISIBILITY_DEFAULT;
-      else
+      /* APPLE LOCAL end ms tinfo compat 4230099 */
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+      else if (!DECL_VISIBILITY_SPECIFIED (decl))
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	{
 	  DECL_VISIBILITY (decl) = CLASSTYPE_VISIBILITY (class_type);
 	  DECL_VISIBILITY_SPECIFIED (decl) = 0;
@@ -1725,7 +1685,10 @@ import_export_decl (tree decl)
   int emit_p;
   bool comdat_p;
   bool import_p;
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+  tree class_type = NULL_TREE;
 
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
   if (DECL_INTERFACE_KNOWN (decl))
     return;
 
@@ -1743,7 +1706,7 @@ import_export_decl (tree decl)
      vague linkage, maybe_commonize_var is used.
 
      Therefore, the only declarations that should be provided to this
-     function are those with external linkage that:
+     function are those with external linkage that are:
 
      * implicit instantiations of function templates
 
@@ -1815,39 +1778,81 @@ import_export_decl (tree decl)
     ;
   else if (TREE_CODE (decl) == VAR_DECL && DECL_VTABLE_OR_VTT_P (decl))
     {
-      tree type = DECL_CONTEXT (decl);
-      import_export_class (type);
-      if (TYPE_FOR_JAVA (type))
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+      class_type = DECL_CONTEXT (decl);
+      import_export_class (class_type);
+      if (TYPE_FOR_JAVA (class_type))
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	import_p = true;
-      else if (CLASSTYPE_INTERFACE_KNOWN (type)
-	       && CLASSTYPE_INTERFACE_ONLY (type))
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+      else if (CLASSTYPE_INTERFACE_KNOWN (class_type)
+	       && CLASSTYPE_INTERFACE_ONLY (class_type))
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	import_p = true;
-      else if (TARGET_WEAK_NOT_IN_ARCHIVE_TOC
-	       && !CLASSTYPE_USE_TEMPLATE (type)
-	       && CLASSTYPE_KEY_METHOD (type)
-	       && !DECL_DECLARED_INLINE_P (CLASSTYPE_KEY_METHOD (type)))
+      else if ((!flag_weak || TARGET_WEAK_NOT_IN_ARCHIVE_TOC)
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+	       && !CLASSTYPE_USE_TEMPLATE (class_type)
+	       && CLASSTYPE_KEY_METHOD (class_type)
+	       && !DECL_DECLARED_INLINE_P (CLASSTYPE_KEY_METHOD (class_type)))
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	/* The ABI requires that all virtual tables be emitted with
 	   COMDAT linkage.  However, on systems where COMDAT symbols
 	   don't show up in the table of contents for a static
-	   archive, the linker will report errors about undefined
-	   symbols because it will not see the virtual table
-	   definition.  Therefore, in the case that we know that the
-	   virtual table will be emitted in only one translation
-	   unit, we make the virtual table an ordinary definition
-	   with external linkage.  */
+	   archive, or on systems without weak symbols (where we
+	   approximate COMDAT linkage by using internal linkage), the
+	   linker will report errors about undefined symbols because
+	   it will not see the virtual table definition.  Therefore,
+	   in the case that we know that the virtual table will be
+	   emitted in only one translation unit, we make the virtual
+	   table an ordinary definition with external linkage.  */
 	DECL_EXTERNAL (decl) = 0;
-      else if (CLASSTYPE_INTERFACE_KNOWN (type))
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+      else if (CLASSTYPE_INTERFACE_KNOWN (class_type))
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	{
-	  /* TYPE is being exported from this translation unit, so DECL
-	     should be defined here.  The ABI requires COMDAT
-	     linkage.  Normally, we only emit COMDAT things when they
-	     are needed; make sure that we realize that this entity is
-	     indeed needed.  */
-	  comdat_p = true;
-	  mark_needed (decl);
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+	  /* CLASS_TYPE is being exported from this translation unit,
+	     so DECL should be defined here.  */ 
+	  if (!flag_weak && CLASSTYPE_EXPLICIT_INSTANTIATION (class_type))
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
+	    /* If a class is declared in a header with the "extern
+	       template" extension, then it will not be instantiated,
+	       even in translation units that would normally require
+	       it.  Often such classes are explicitly instantiated in
+	       one translation unit.  Therefore, the explicit
+	       instantiation must be made visible to other translation
+	       units.  */
+	    DECL_EXTERNAL (decl) = 0;
+	  else
+	    {
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+	      /* The generic C++ ABI says that class data is always
+		 COMDAT, even if there is a key function.  Some
+		 variants (e.g., the ARM EABI) says that class data
+		 only has COMDAT linkage if the class data might be
+		 emitted in more than one translation unit.  When the
+		 key method can be inline and is inline, we still have
+		 to arrange for comdat even though
+		 class_data_always_comdat is false.  */
+	      if (!CLASSTYPE_KEY_METHOD (class_type)
+		  || (DECL_DECLARED_INLINE_P (CLASSTYPE_KEY_METHOD (class_type))
+		      && targetm.cxx.key_method_may_be_inline ())
+		  || targetm.cxx.class_data_always_comdat ())
+		{
+		  /* The ABI requires COMDAT linkage.  Normally, we
+		     only emit COMDAT things when they are needed;
+		     make sure that we realize that this entity is
+		     indeed needed.  */
+		  comdat_p = true;
+		  mark_needed (decl);
+		}
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
+	    }
 	}
       else if (!flag_implicit_templates
-	       && CLASSTYPE_IMPLICIT_INSTANTIATION (type))
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+	       && CLASSTYPE_IMPLICIT_INSTANTIATION (class_type))
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	import_p = true;
       else
 	comdat_p = true;
@@ -1857,6 +1862,9 @@ import_export_decl (tree decl)
       tree type = TREE_TYPE (DECL_NAME (decl));
       if (CLASS_TYPE_P (type))
 	{
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+	  class_type = type;
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	  import_export_class (type);
 	  if (CLASSTYPE_INTERFACE_KNOWN (type)
 	      && TYPE_POLYMORPHIC_P (type)
@@ -1869,10 +1877,28 @@ import_export_decl (tree decl)
 	    import_p = true;
 	  else 
 	    {
-	      comdat_p = true;
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	      if (CLASSTYPE_INTERFACE_KNOWN (type)
 		  && !CLASSTYPE_INTERFACE_ONLY (type))
-		mark_needed (decl);
+		{
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+		  comdat_p = (targetm.cxx.class_data_always_comdat ()
+			      || (CLASSTYPE_KEY_METHOD (type)
+				  && DECL_DECLARED_INLINE_P (CLASSTYPE_KEY_METHOD (type))
+				  && targetm.cxx.key_method_may_be_inline ()));
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
+		  mark_needed (decl);
+		  if (!flag_weak)
+		    {
+		      comdat_p = false;
+		      DECL_EXTERNAL (decl) = 0;
+		    }
+		}
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+	      else
+		comdat_p = true;
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
 	    }
 	}
       else
@@ -1937,6 +1963,23 @@ import_export_decl (tree decl)
       comdat_linkage (decl);
     }
 
+/* APPLE LOCAL begin mainline 4.2 2006-03-01 4311680 */
+  /* Give the target a chance to override the visibility associated
+     with DECL.  */
+  if (TREE_CODE (decl) == VAR_DECL
+      && (DECL_TINFO_P (decl)
+	  || (DECL_VTABLE_OR_VTT_P (decl)
+	      /* Construction virtual tables are not exported because
+		 they cannot be referred to from other object files;
+		 their name is not standardized by the ABI.  */
+	      && !DECL_CONSTRUCTION_VTABLE_P (decl)))
+      && TREE_PUBLIC (decl)
+      && !DECL_REALLY_EXTERN (decl)
+      && DECL_VISIBILITY_SPECIFIED (decl)
+      && (!class_type || !CLASSTYPE_VISIBILITY_SPECIFIED (class_type)))
+    targetm.cxx.determine_class_data_visibility (decl);
+  
+/* APPLE LOCAL end mainline 4.2 2006-03-01 4311680 */
   DECL_INTERFACE_KNOWN (decl) = 1;
 }
 
@@ -2000,6 +2043,7 @@ get_guard (tree decl)
         DECL_WEAK (guard) = DECL_WEAK (decl);
       
       DECL_ARTIFICIAL (guard) = 1;
+      DECL_IGNORED_P (guard) = 1;
       TREE_USED (guard) = 1;
       pushdecl_top_level_and_finish (guard, NULL_TREE);
     }
@@ -2119,7 +2163,8 @@ start_objects (int method_type, int initp)
 
   /* APPLE LOCAL begin static structors in __StaticInit section */
 #ifdef STATIC_INIT_SECTION
-  if ( ! flag_apple_kext)
+  /* What should we do for kextabi == 2? */
+  if (!TARGET_KEXTABI)
     DECL_SECTION_NAME (current_function_decl) = 
       build_string (strlen (STATIC_INIT_SECTION), STATIC_INIT_SECTION);
 #endif
@@ -2233,7 +2278,8 @@ start_static_storage_duration_function (unsigned count)
 
   /* APPLE LOCAL begin static structors in __StaticInit section */
 #ifdef STATIC_INIT_SECTION
-  if ( ! flag_apple_kext)
+  /* What should we do for kextabi == 2? */
+  if (!TARGET_KEXTABI)
     DECL_SECTION_NAME (ssdf_decl) = build_string (strlen (STATIC_INIT_SECTION),
 						  STATIC_INIT_SECTION);
 #endif
@@ -2409,9 +2455,16 @@ start_static_initialization_or_destruction (tree decl, int initp)
      might be initialized in more than one place.  (For example, a
      static data member of a template, when the data member requires
      construction.)  */
+  /* APPLE LOCAL begin Radar 4539933 */
+  /* Need guard variables for explicitly instantiated templated
+     static data (darwin only) */
   if (TREE_PUBLIC (decl) && (DECL_COMMON (decl) 
 			     || DECL_ONE_ONLY (decl)
-			     || DECL_WEAK (decl)))
+			     || DECL_WEAK (decl)
+			     || (TARGET_WEAK_NOT_IN_ARCHIVE_TOC && DECL_LANG_SPECIFIC (decl)
+                                 && (DECL_EXPLICIT_INSTANTIATION (decl)
+                                 ||  DECL_TEMPLATE_SPECIALIZATION (decl)))))
+  /* APPLE LOCAL end Radar 4539933 */
     {
       tree guard_cond;
 
@@ -2494,7 +2547,7 @@ do_static_initialization (tree decl, tree init)
   if (init)
     finish_expr_stmt (init);
 
-  /* If we're using __cxa_atexit, register a a function that calls the
+  /* If we're using __cxa_atexit, register a function that calls the
      destructor for the object.  */
   if (flag_use_cxa_atexit)
     finish_expr_stmt (register_dtor_fn (decl));
@@ -2633,7 +2686,7 @@ generate_ctor_or_dtor_function (bool constructor_p, int priority,
      global constructors and destructors.  */
   body = NULL_TREE;
 
-  /* APPLE LOCAL begin Objective-C++ */
+  /* APPLE LOCAL begin mainline */
   /* For Objective-C++, we may need to initialize metadata found in this module.
      This must be done _before_ any other static initializations.  */
   if (c_dialect_objc () && (priority == DEFAULT_INIT_PRIORITY)
@@ -2642,7 +2695,7 @@ generate_ctor_or_dtor_function (bool constructor_p, int priority,
       body = start_objects (function_key, priority);
       static_ctors = objc_generate_static_init_call (static_ctors);
     }
-  /* APPLE LOCAL end Objective-C++ */
+  /* APPLE LOCAL end mainline */
 
   /* Call the static storage duration function with appropriate
      arguments.  */
@@ -2955,6 +3008,10 @@ cp_finish_file (void)
 		 finish_function doesn't clean things up, and we end
 		 up with CURRENT_FUNCTION_DECL set.  */
 	      push_to_top_level ();
+	      /* The decl's location will mark where it was first
+	         needed.  Save that so synthesize method can indicate
+	         where it was needed from, in case of error  */
+	      input_location = DECL_SOURCE_LOCATION (decl);
 	      synthesize_method (decl);
 	      pop_from_top_level ();
 	      reconsider = true;
@@ -3073,7 +3130,7 @@ cp_finish_file (void)
 	     already verified there was a definition.  */
 	  && !DECL_EXPLICIT_INSTANTIATION (decl))
 	{
-	  cp_warning_at ("inline function `%D' used but never defined", decl);
+	  cp_warning_at ("inline function %qD used but never defined", decl);
 	  /* This symbol is effectively an "extern" declaration now.
 	     This is not strictly necessary, but removes a duplicate
 	     warning.  */
@@ -3104,6 +3161,9 @@ cp_finish_file (void)
   /* We're done with the splay-tree now.  */
   if (priority_info_map)
     splay_tree_delete (priority_info_map);
+
+  /* Generate any missing aliases.  */
+  maybe_apply_pending_pragma_weaks ();
 
   /* We're done with static constructors, so we can go back to "C++"
      linkage now.  */
@@ -3238,6 +3298,14 @@ mark_used (tree decl)
     {
       if (DECL_DEFERRED_FN (decl))
 	return;
+      
+      /* Remember the current location for a function we will end up
+         synthesizing.  Then we can inform the user where it was
+         required in the case of error.  */
+      if (DECL_ARTIFICIAL (decl) && DECL_NONSTATIC_MEMBER_FUNCTION_P (decl)
+	  && !DECL_THUNK_P (decl))
+	DECL_SOURCE_LOCATION (decl) = input_location;
+      
       note_vague_linkage_fn (decl);
     }
   
@@ -3249,7 +3317,10 @@ mark_used (tree decl)
       && DECL_ARTIFICIAL (decl) 
       && !DECL_THUNK_P (decl)
       && ! DECL_INITIAL (decl)
-      /* Kludge: don't synthesize for default args.  */
+      /* Kludge: don't synthesize for default args.  Unfortunately this
+	 rules out initializers of namespace-scoped objects too, but
+	 it's sort-of ok if the implicit ctor or dtor decl keeps
+	 pointing to the class location.  */
       && current_function_decl)
     {
       synthesize_method (decl);

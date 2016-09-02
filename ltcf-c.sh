@@ -267,6 +267,7 @@ else
     hardcode_direct=yes
     hardcode_libdir_separator=':'
     link_all_deplibs=yes
+    file_list_spec='${wl}-f,'
     # When large executables or shared objects are built, AIX ld can
     # have problems creating the table of contents.  If linking a library
     # or program results in "error TOC overflow" add -mminimal-toc to
@@ -401,7 +402,8 @@ else
     esac
     # Disable shared library build on OS-X older than 10.3.
     case $host_os in
-	darwin[1-6]*)
+	# APPLE LOCAL darwin10
+	darwin[3-6]*)
 	    can_build_shared=no
 	    ;;
 	darwin7*)

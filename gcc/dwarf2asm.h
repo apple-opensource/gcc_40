@@ -1,5 +1,6 @@
 /* Dwarf2 assembler output helper routines.
-   Copyright (C) 2001, 2003 Free Software Foundation, Inc.
+   APPLE LOCAL mainline 2006-03-16 dwarf 4383509
+   Copyright (C) 2001, 2003, 2005, 2006 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -29,12 +30,12 @@ extern void dw2_asm_output_delta (int, const char *, const char *,
 				  const char *, ...)
      ATTRIBUTE_NULL_PRINTF_4;
 
-extern void dw2_asm_output_offset (int, const char *, const char *, ...)
-     ATTRIBUTE_NULL_PRINTF_3;
+/* APPLE LOCAL begin mainline 2006-03-16 dwarf 4383509 */
+extern void dw2_asm_output_offset (int, const char *, const char *, 
+				   const char *, ...)
+     ATTRIBUTE_NULL_PRINTF_4;
 
-extern void dw2_asm_output_pcrel (int, const char *, const char *, ...)
-     ATTRIBUTE_NULL_PRINTF_3;
-
+/* APPLE LOCAL end mainline 2006-03-16 dwarf 4383509 */
 extern void dw2_asm_output_addr (int, const char *, const char *, ...)
      ATTRIBUTE_NULL_PRINTF_3;
 
@@ -61,13 +62,20 @@ extern void dw2_asm_output_delta_uleb128 (const char *, const char *,
 					  const char *, ...)
      ATTRIBUTE_NULL_PRINTF_3;
 
-extern void dw2_asm_output_delta_sleb128 (const char *, const char *,
-					  const char *, ...)
-     ATTRIBUTE_NULL_PRINTF_3;
-
 extern int size_of_uleb128 (unsigned HOST_WIDE_INT);
 extern int size_of_sleb128 (HOST_WIDE_INT);
 extern int size_of_encoded_value (int);
 extern const char *eh_data_format_name (int);
 
 extern void dw2_output_indirect_constants (void);
+
+/* These are currently unused.  */
+
+#if 0
+extern void dw2_asm_output_pcrel (int, const char *, const char *, ...)
+     ATTRIBUTE_NULL_PRINTF_3;
+
+extern void dw2_asm_output_delta_sleb128 (const char *, const char *,
+					  const char *, ...)
+     ATTRIBUTE_NULL_PRINTF_3;
+#endif

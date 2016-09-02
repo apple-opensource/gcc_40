@@ -48,7 +48,8 @@
 
 /* Experimental addition for pr 7885.
    Ignore dllimport for functions.  */
-#define TARGET_FLAG_NOP_FUN	(1 << 24)
+/* APPLE LOCAL ARM change bit number to avoid conflict with arm.h. */
+#define TARGET_FLAG_NOP_FUN	(1 << 30)
 
 #undef  TARGET_NOP_FUN_DLLIMPORT
 #define TARGET_NOP_FUN_DLLIMPORT (target_flags & TARGET_FLAG_NOP_FUN)
@@ -60,7 +61,7 @@
 { "no-nop-fun-dllimport",	- TARGET_FLAG_NOP_FUN, "" },
 
 #undef  TARGET_DEFAULT
-#define TARGET_DEFAULT	(ARM_FLAG_SOFT_FLOAT | TARGET_FLAG_NOP_FUN)
+#define TARGET_DEFAULT	(TARGET_FLAG_NOP_FUN)
 
 #undef  MULTILIB_DEFAULTS
 #define MULTILIB_DEFAULTS \

@@ -1,7 +1,8 @@
-/* APPLE LOCAL file Objective-C++ */
+/* APPLE LOCAL file mainline */
 /* { dg-do run } */
 
-#include <objc/Object.h>
+/* APPLE LOCAL radar 4894756 */
+#include "../objc/execute/Object2.h"
 #include <stdlib.h>
 
 typedef struct MyWidget {
@@ -36,11 +37,11 @@ MyWidget gWidget = { 17 };
 @implementation Container
 + (MyWidget *)elementForView:(Foo *)view
 {
-    MyWidget *widget = nil;
-    if ([view conformsTo:@protocol(MyProto)]) {
-        widget = [(Foo <MyProto> *)view widget];
-    }
-    return widget;
+  MyWidget *widget = nil;
+  if ([view conformsTo:@protocol(MyProto)]) {
+    widget = [(Foo <MyProto> *)view widget];
+  }
+  return widget;
 }
 @end
 

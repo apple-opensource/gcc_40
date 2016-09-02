@@ -1,5 +1,6 @@
 /* Definitions for CPP library.
-   Copyright (C) 1995, 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004
+   Copyright (C) 1995, 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003,
+   2004, 2005
    Free Software Foundation, Inc.
    Written by Per Bothner, 1994-95.
 
@@ -140,6 +141,10 @@ struct _cpp_file;
 				 /* SPELL_LITERAL happens to DTRT.  */	\
   TK(MACRO_ARG,		NONE)	 /* Macro argument.  */			\
   TK(PRAGMA,		NONE)	 /* Only if deferring pragmas */	\
+  /* APPLE LOCAL begin 4137741 */                                       \
+  TK(BINCL,            NONE)    /* File begin */                        \
+  TK(EINCL,            NONE)    /* File end */                          \
+  /* APPLE LOCAL end 4137741 */                                         \
   TK(PADDING,		NONE)	 /* Whitespace for -E.	*/
 
 #define OP(e, s) CPP_ ## e,
@@ -158,7 +163,7 @@ enum cpp_ttype
 #undef OP
 #undef TK
 
-/* C language kind, used when calling cpp_reader_init.  */
+/* C language kind, used when calling cpp_create_reader.  */
 enum c_lang {CLK_GNUC89 = 0, CLK_GNUC99, CLK_STDC89, CLK_STDC94, CLK_STDC99,
 	     CLK_GNUCXX, CLK_CXX98, CLK_ASM};
 
@@ -240,6 +245,21 @@ typedef CPPCHAR_SIGNED_T cppchar_signed_t;
 
 /* Style of header dependencies to generate.  */
 enum cpp_deps_style { DEPS_NONE = 0, DEPS_USER, DEPS_SYSTEM };
+
+/* APPLE LOCAL begin mainline UCNs 2005-04-17 3892809 */
+/* The possible normalization levels, from most restrictive to least.  */
+enum cpp_normalize_level {
+  /* In NFKC.  */
+  normalized_KC = 0,
+  /* In NFC.  */
+  normalized_C,
+  /* In NFC, except for subsequences where being in NFC would make
+     the identifier invalid.  */
+  normalized_identifier_C,
+  /* Not normalized at all.  */
+  normalized_none
+};
+/* APPLE LOCAL end mainline UCNs 2005-04-17 3892809 */
 
 /* This structure is nested inside struct cpp_reader, and
    carries all the options visible to the command line.  */
@@ -332,6 +352,12 @@ struct cpp_options
   unsigned char pascal_strings;
   /* APPLE LOCAL end pascal strings */
 
+  /* APPLE LOCAL begin CW asm blocks */
+  /* Nonzero means accept integer constants with an h suffix to denote
+     hex constants.  An example would be 0ffh.  */
+  unsigned char h_suffix;
+  /* APPLE LOCAL end CW asm blocks */
+
   /* Nonzero means warn about multicharacter charconsts.  */
   unsigned char warn_multichar;
 
@@ -392,9 +418,10 @@ struct cpp_options
   /* Nonzero means handle C++ alternate operator names.  */
   unsigned char operator_names;
 
-  /* APPLE LOCAL -Wno-#warnings */
+  /* APPLE LOCAL begin -Wno-#warnings */
   /* Nonzero means suppress all #warning messages. (Radar 2796309) */
   int no_pound_warnings;
+  /* APPLE LOCAL end -Wno-#warnings */
 
   /* True for traditional preprocessing.  */
   unsigned char traditional;
@@ -407,6 +434,12 @@ struct cpp_options
 
   /* Holds the name of the input character set.  */
   const char *input_charset;
+
+/* APPLE LOCAL begin mainline UCNs 2005-04-17 3892809 */
+  /* The minimum permitted level of normalization before a warning
+     is generated.  */
+  enum cpp_normalize_level warn_normalize;
+/* APPLE LOCAL end mainline UCNs 2005-04-17 3892809 */
 
   /* True to warn about precompiled header files we couldn't use.  */
   bool warn_invalid_pch;
@@ -422,11 +455,11 @@ struct cpp_options
   bool use_ss;
   /* APPLE LOCAL end Symbol Separation */
 
-  /* APPLE LOCAL BEGIN pch distcc --mrs */
+  /* APPLE LOCAL begin pch distcc --mrs */
   /* True if PCH should omit from the -E output all lines from PCH files
      found in PCH files.  */
   unsigned char pch_preprocess;
-  /* APPLE LOCAL END pch distcc --mrs */
+  /* APPLE LOCAL end pch distcc --mrs */
 
   /* Dependency generation.  */
   struct
@@ -464,6 +497,12 @@ struct cpp_options
   /* True means return pragmas as tokens rather than processing
      them directly. */
   bool defer_pragmas;
+  /* APPLE LOCAL begin 4137741 */
+
+  /* True means return special CPP_BINCL and CPP_EINCL tokens instead
+     of firing off debug hooks when entering and exiting headers.  */
+  bool defer_file_change_debug_hooks;
+  /* APPLE LOCAL end 4137741 */
 };
 
 /* Callback for header lookup for HEADER, which is the name of a
@@ -724,9 +763,10 @@ extern unsigned int cpp_errors (cpp_reader *);
 extern unsigned int cpp_token_len (const cpp_token *);
 extern unsigned char *cpp_token_as_text (cpp_reader *, const cpp_token *);
 extern unsigned char *cpp_spell_token (cpp_reader *, const cpp_token *,
-				       unsigned char *);
+  /* APPLE LOCAL mainline UCNs 2005-04-17 3892809 */
+				       unsigned char *, bool);
 extern void cpp_register_pragma (cpp_reader *, const char *, const char *,
-				 void (*) (cpp_reader *));
+				 void (*) (cpp_reader *), bool);
 extern void cpp_handle_deferred_pragma (cpp_reader *, const cpp_string *);
 extern int cpp_avoid_paste (cpp_reader *, const cpp_token *,
 			    const cpp_token *);
@@ -751,6 +791,9 @@ extern bool cpp_interpret_string_notranslate (cpp_reader *,
 					      const cpp_string *, size_t,
 					      /* APPLE LOCAL pascal strings */
 					      cpp_string *, bool, bool);
+
+/* Convert a host character constant to the execution character set.  */
+extern cppchar_t cpp_host_to_exec_charset (cpp_reader *, cppchar_t);
 
 /* Used to register macros and assertions, perhaps from the command line.
    The text is the same as the command line argument.  */
@@ -835,12 +878,6 @@ cpp_num cpp_num_sign_extend (cpp_num, size_t);
 /* Nonzero if a diagnostic level is one of the warnings.  */
 #define CPP_DL_WARNING_P(l)	(CPP_DL_EXTRACT (l) >= CPP_DL_WARNING \
 				 && CPP_DL_EXTRACT (l) <= CPP_DL_PEDWARN)
-
-/* N.B. The error-message-printer prototypes have not been nicely
-   formatted because exgettext needs to see 'msgid' on the same line
-   as the name of the function in order to work properly.  Only the
-   string argument gets a name in an effort to keep the lines from
-   getting ridiculously oversized.  */
 
 /* Output a diagnostic of some kind.  */
 extern void cpp_error (cpp_reader *, int, const char *msgid, ...)
@@ -935,6 +972,10 @@ extern bool read_from_stdin PARAMS ((cpp_reader *));
 extern void set_stdin_option PARAMS ((cpp_reader *, int));
 /* APPLE LOCAL end predictive compilation */
 
+/* APPLE LOCAL begin radar 2996215 */
+extern bool cpp_utf8_utf16 (cpp_reader *pfile, const unsigned char *from, 
+			    size_t flen, unsigned char **to, size_t *to_len);
+/* APPLE LOCAL end radar 2996215 */
 /* In cpppch.c */
 struct save_macro_data;
 extern int cpp_save_state (cpp_reader *, FILE *);

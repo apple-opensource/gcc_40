@@ -1,6 +1,6 @@
 /* Reload pseudo regs into hard regs for insns that require hard regs.
    Copyright (C) 1987, 1988, 1989, 1992, 1993, 1994, 1995, 1996, 1997, 1998,
-   1999, 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+   1999, 2000, 2001, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -383,7 +383,7 @@ static int eliminate_regs_in_insn (rtx, int);
 static void update_eliminable_offsets (void);
 static void mark_not_eliminable (rtx, rtx, void *);
 static void set_initial_elim_offsets (void);
-static void verify_initial_elim_offsets (void);
+static bool verify_initial_elim_offsets (void);
 static void set_initial_label_offsets (void);
 static void set_offsets_for_label (rtx);
 static void init_elim_table (void);
@@ -430,6 +430,8 @@ static rtx inc_for_reload (rtx, rtx, rtx, int);
 static void add_auto_inc_notes (rtx, rtx);
 #endif
 static void copy_eh_notes (rtx, rtx);
+static int reloads_conflict (int, int);
+static rtx gen_reload (rtx, rtx, int, enum reload_type);
 
 /* Initialize the reload pass once per compilation.  */
 
@@ -618,6 +620,11 @@ int something_needs_operands_changed;
 /* Nonzero means we couldn't get enough spill regs.  */
 static int failure;
 
+/* APPLE LOCAL begin 4321079 */
+/* Make parameter of 'reload' visible to other functions.  */
+static int from_global;
+/* APPLE LOCAL end 4321079 */
+
 /* Main entry point for the reload pass.
 
    FIRST is the first insn of the function being compiled.
@@ -638,6 +645,10 @@ reload (rtx first, int global)
   rtx insn;
   struct elim_table *ep;
   basic_block bb;
+
+  /* APPLE LOCAL begin 4321079 */
+  from_global = global;
+  /* APPLE LOCAL end 4321079 */
 
   /* Make sure even insns with volatile mem refs are recognizable.  */
   init_recog ();
@@ -680,17 +691,6 @@ reload (rtx first, int global)
       if (! call_used_regs[i] && ! fixed_regs[i] && ! LOCAL_REGNO (i))
 	regs_ever_live[i] = 1;
 
-#ifdef NON_SAVING_SETJMP
-  /* A function that calls setjmp should save and restore all the
-     call-saved registers on a system where longjmp clobbers them.  */
-  if (NON_SAVING_SETJMP && current_function_calls_setjmp)
-    {
-      for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
-	if (! call_used_regs[i])
-	  regs_ever_live[i] = 1;
-    }
-#endif
-
   /* Find all the pseudo registers that didn't get hard regs
      but do have known equivalent constants or memory slots.
      These include parameters (known equivalent to parameter slots)
@@ -732,14 +732,15 @@ reload (rtx first, int global)
       if (set != 0 && REG_P (SET_DEST (set)))
 	{
 	  rtx note = find_reg_note (insn, REG_EQUIV, NULL_RTX);
+	  /* APPLE LOCAL begin ARM -mdynamic-no-pic support */
 	  if (note
 	      && (! function_invariant_p (XEXP (note, 0))
-		  || ! flag_pic
 		  /* A function invariant is often CONSTANT_P but may
 		     include a register.  We promise to only pass
 		     CONSTANT_P objects to LEGITIMATE_PIC_OPERAND_P.  */
 		  || (CONSTANT_P (XEXP (note, 0))
-		      && LEGITIMATE_PIC_OPERAND_P (XEXP (note, 0)))))
+		      && LEGITIMATE_INDIRECT_OPERAND_P (XEXP (note, 0)))))
+	  /* APPLE LOCAL end ARM -mdynamic-no-pic support */
 	    {
 	      rtx x = XEXP (note, 0);
 	      i = REGNO (SET_DEST (set));
@@ -831,6 +832,14 @@ reload (rtx first, int global)
   for (i = LAST_VIRTUAL_REGISTER + 1; i < max_regno; i++)
     alter_reg (i, -1);
 
+  /* APPLE LOCAL begin 4321079 */
+  if (from_global)
+    {
+      extern void remove_invalidated_death_notes (rtx);
+      remove_invalidated_death_notes (first);
+    }
+  /* APPLE LOCAL end 4321079 */
+
   /* If we have some registers we think can be eliminated, scan all insns to
      see if there is an insn that sets one of these registers to something
      other than itself plus a constant.  If so, the register cannot be
@@ -900,6 +909,10 @@ reload (rtx first, int global)
       set_initial_elim_offsets ();
       set_initial_label_offsets ();
 
+      /* APPLE LOCAL begin 4271691 */
+      something_changed = 0;
+      /* APPLE LOCAL end 4271691 */
+
       /* For each pseudo register that has an equivalent location defined,
 	 try to eliminate any eliminable registers (such as the frame pointer)
 	 assuming initial offsets for the replacement register, which
@@ -952,6 +965,12 @@ reload (rtx first, int global)
 		reg_equiv_memory_loc[i] = 0;
 		reg_equiv_init[i] = 0;
 		alter_reg (i, -1);
+		/* APPLE LOCAL begin 4271691 */
+		/* Since this might be a reuse of an existing stack slot
+		   rather than a new one, the frame size did not necessarily
+		   increase.  Make sure we do another pass. */
+	        something_changed = 1;
+		/* APPLE LOCAL end 4271691 */
 	      }
 	  }
 
@@ -974,11 +993,19 @@ reload (rtx first, int global)
       CLEAR_REG_SET (&spilled_pseudos);
       did_spill = 0;
 
-      something_changed = 0;
+      /* APPLE LOCAL begin 4271691 something_changed=0 moved earlier */
+      /* APPLE LOCAL end 4271691 */
 
       /* If we allocated any new memory locations, make another pass
 	 since it might have changed elimination offsets.  */
       if (starting_frame_size != get_frame_size ())
+	something_changed = 1;
+
+      /* Even if the frame size remained the same, we might still have
+	 changed elimination offsets, e.g. if find_reloads called 
+	 force_const_mem requiring the back end to allocate a constant
+	 pool base register that needs to be saved on the stack.  */
+      else if (!verify_initial_elim_offsets ())
 	something_changed = 1;
 
       {
@@ -1072,8 +1099,7 @@ reload (rtx first, int global)
 
       gcc_assert (old_frame_size == get_frame_size ());
 
-      if (num_eliminable)
-	verify_initial_elim_offsets ();
+      gcc_assert (verify_initial_elim_offsets ());
     }
 
   /* If we were able to eliminate the frame pointer, show that it is no
@@ -1589,7 +1615,7 @@ count_pseudo (int reg)
 static void
 order_regs_for_reload (struct insn_chain *chain)
 {
-  int i;
+  unsigned i;
   HARD_REG_SET used_by_pseudos;
   HARD_REG_SET used_by_pseudos2;
   reg_set_iterator rsi;
@@ -1712,6 +1738,21 @@ find_reg (struct insn_chain *chain, int order)
 	      /* Among registers with equal cost, prefer caller-saved ones, or
 		 use REG_ALLOC_ORDER if it is defined.  */
 	      || (this_cost == best_cost
+/* APPLE LOCAL begin ARM add DIMODE_REG_ALLOC_ORDER */
+#ifdef DIMODE_REG_ALLOC_ORDER
+		  && ((rl->mode == DImode 
+		        && dimode_inv_reg_alloc_order[regno]
+		           < dimode_inv_reg_alloc_order[best_reg])
+		      || (rl->mode != DImode
+#ifdef REG_ALLOC_ORDER
+			  && (inv_reg_alloc_order[regno]
+			      < inv_reg_alloc_order[best_reg])
+#else
+			  && call_used_regs[regno]
+			  && ! call_used_regs[best_reg]
+#endif
+		    ))
+#else
 #ifdef REG_ALLOC_ORDER
 		  && (inv_reg_alloc_order[regno]
 		      < inv_reg_alloc_order[best_reg])
@@ -1719,6 +1760,8 @@ find_reg (struct insn_chain *chain, int order)
 		  && call_used_regs[regno]
 		  && ! call_used_regs[best_reg]
 #endif
+#endif
+/* APPLE LOCAL end ARM add DIMODE_REG_ALLOC_ORDER */
 		  ))
 	    {
 	      best_reg = regno;
@@ -1870,7 +1913,6 @@ delete_caller_save_insns (void)
 static void
 spill_failure (rtx insn, enum reg_class class)
 {
-  static const char *const reg_class_names[] = REG_CLASS_NAMES;
   if (asm_noperands (PATTERN (insn)) >= 0)
     error_for_asm (insn, "can't find a register in class %qs while "
 		   "reloading %<asm%>",
@@ -1953,9 +1995,21 @@ alter_reg (int i, int from_reg)
 	 inherent space, and no less total space, then the previous slot.  */
       if (from_reg == -1)
 	{
-	  /* No known place to spill from => no slot to reuse.  */
-	  x = assign_stack_local (GET_MODE (regno_reg_rtx[i]), total_size,
-				  inherent_size == total_size ? 0 : -1);
+	  /* APPLE LOCAL begin 4321079 */
+	  extern rtx find_tied_stack_pseudo (int);
+	  /* Ask global reg allocator for a stack slot already assigned
+	     to a pseudo tied to this one.  */
+	  if (from_global)
+	    x = find_tied_stack_pseudo (i);
+	  else
+	    x = NULL;
+
+	  if (!x)
+	    /* No known place to spill from => no slot to reuse.  */
+	    x = assign_stack_local (GET_MODE (regno_reg_rtx[i]), total_size,
+				    inherent_size == total_size ? 0 : -1);
+	  /* APPLE LOCAL end 4321079 */
+
 	  if (BYTES_BIG_ENDIAN)
 	    /* Cancel the  big-endian correction done in assign_stack_local.
 	       Get the address of the beginning of the slot.
@@ -3285,23 +3339,32 @@ mark_not_eliminable (rtx dest, rtx x, void *data ATTRIBUTE_UNUSED)
    where something illegal happened during reload_as_needed that could
    cause incorrect code to be generated if we did not check for it.  */
 
-static void
+static bool
 verify_initial_elim_offsets (void)
 {
   HOST_WIDE_INT t;
 
-#ifdef ELIMINABLE_REGS
-  struct elim_table *ep;
+  if (!num_eliminable)
+    return true;
 
-  for (ep = reg_eliminate; ep < &reg_eliminate[NUM_ELIMINABLE_REGS]; ep++)
-    {
-      INITIAL_ELIMINATION_OFFSET (ep->from, ep->to, t);
-      gcc_assert (t == ep->initial_offset);
-    }
+#ifdef ELIMINABLE_REGS
+  {
+   struct elim_table *ep;
+
+   for (ep = reg_eliminate; ep < &reg_eliminate[NUM_ELIMINABLE_REGS]; ep++)
+     {
+       INITIAL_ELIMINATION_OFFSET (ep->from, ep->to, t);
+       if (t != ep->initial_offset)
+	 return false;
+     }
+  }
 #else
   INITIAL_FRAME_POINTER_OFFSET (t);
-  gcc_assert (t == reg_eliminate[0].initial_offset);
+  if (t != reg_eliminate[0].initial_offset)
+    return false;
 #endif
+
+  return true;
 }
 
 /* Reset all offsets on eliminable registers to their initial values.  */
@@ -3325,6 +3388,14 @@ set_initial_elim_offsets (void)
   num_not_at_initial_offset = 0;
 }
 
+/* Subroutine of set_initial_label_offsets called via for_each_eh_label.  */
+
+static void
+set_initial_eh_label_offset (rtx label)
+{
+  set_label_offsets (label, NULL_RTX, 1);
+}
+
 /* Initialize the known label offsets.
    Set a known offset for each forced label to be at the initial offset
    of each elimination.  We do this because we assume that all
@@ -3341,6 +3412,8 @@ set_initial_label_offsets (void)
   for (x = forced_labels; x; x = XEXP (x, 1))
     if (XEXP (x, 0))
       set_label_offsets (XEXP (x, 0), NULL_RTX, 1);
+
+  for_each_eh_label (set_initial_eh_label_offset);
 }
 
 /* Set all elimination offsets to the known values for the code label given
@@ -3376,7 +3449,17 @@ update_eliminables (HARD_REG_SET *pset)
   struct elim_table *ep;
 
   for (ep = reg_eliminate; ep < &reg_eliminate[NUM_ELIMINABLE_REGS]; ep++)
+/* APPLE LOCAL begin ARM prefer SP to FP */
+#ifdef TARGET_ARM
+    /* Don't prevent elimination to SP for the ARM target -- it can be more
+       efficient than the FP.  For those cases where elimination to the SP
+       isn't valid (e.g., alloca present in function), CAN_ELIMINATE is
+       specific enough to detect and disallow them.  */
+    if (0
+#else
     if ((ep->from == HARD_FRAME_POINTER_REGNUM && FRAME_POINTER_REQUIRED)
+#endif
+/* APPLE LOCAL end ARM prefer SP to FP */
 #ifdef ELIMINABLE_REGS
 	|| ! CAN_ELIMINATE (ep->from, ep->to)
 #endif
@@ -3426,6 +3509,16 @@ update_eliminables (HARD_REG_SET *pset)
   for (ep = reg_eliminate; ep < &reg_eliminate[NUM_ELIMINABLE_REGS]; ep++)
     {
       if (ep->can_eliminate && ep->from == FRAME_POINTER_REGNUM
+/* APPLE LOCAL begin ARM prefer SP to FP */
+#ifdef TARGET_ARM
+	  /* Because we allow the FP to eliminate into SP, even when
+	     FRAME_POINTER_REQUIRED is 1, we can end up with the case
+	     that all instances of FP are removed but we still have
+	     FRAME_POINTER_REQUIRED.  In that case, don't allow
+	     frame_pointer_needed to be set to 0.  */
+	  && !FRAME_POINTER_REQUIRED
+#endif
+/* APPLE LOCAL end ARM prefer SP to FP */
 	  && ep->to != HARD_FRAME_POINTER_REGNUM)
 	frame_pointer_needed = 0;
 
@@ -3458,16 +3551,20 @@ init_elim_table (void)
 
   /* Does this function require a frame pointer?  */
 
-  frame_pointer_needed = (! flag_omit_frame_pointer
-			  /* ?? If EXIT_IGNORE_STACK is set, we will not save
-			     and restore sp for alloca.  So we can't eliminate
-			     the frame pointer in that case.  At some point,
-			     we should improve this by emitting the
-			     sp-adjusting insns for this case.  */
-			  || (current_function_calls_alloca
-			      && EXIT_IGNORE_STACK)
-			  || FRAME_POINTER_REQUIRED);
-
+  /* APPLE LOCAL begin CW asm blocks */
+  if (cfun->iasm_asm_function)
+    frame_pointer_needed = 0;
+  else
+    frame_pointer_needed = (! flag_omit_frame_pointer
+			    /* ?? If EXIT_IGNORE_STACK is set, we will not save
+			       and restore sp for alloca.  So we can't eliminate
+			       the frame pointer in that case.  At some point,
+			       we should improve this by emitting the
+			       sp-adjusting insns for this case.  */
+			    || (current_function_calls_alloca
+			        && EXIT_IGNORE_STACK)
+			    || FRAME_POINTER_REQUIRED);
+  /* APPLE LOCAL end CW asm blocks */
   num_eliminable = 0;
 
 #ifdef ELIMINABLE_REGS
@@ -3478,7 +3575,16 @@ init_elim_table (void)
       ep->to = ep1->to;
       ep->can_eliminate = ep->can_eliminate_previous
 	= (CAN_ELIMINATE (ep->from, ep->to)
+/* APPLE LOCAL begin ARM prefer SP to FP */
+#ifdef TARGET_ARM
+	  /* CAN_ELIMINATE is sufficient for ARM targets, where we
+	     sometimes do want to eliminate to the SP even when a FP
+	     is present, for performance benefits.  */
+	  );
+#else
 	   && ! (ep->to == STACK_POINTER_REGNUM && frame_pointer_needed));
+#endif
+/* APPLE LOCAL end ARM prefer SP to FP */
     }
 #else
   reg_eliminate[0].from = reg_eliminate_1[0].from;
@@ -3543,7 +3649,7 @@ finish_spills (int global)
 {
   struct insn_chain *chain;
   int something_changed = 0;
-  int i;
+  unsigned i;
   reg_set_iterator rsi;
 
   /* Build the spill_regs array for the function.  */
@@ -3613,7 +3719,7 @@ finish_spills (int global)
 	 and call retry_global_alloc.
 	 We change spill_pseudos here to only contain pseudos that did not
 	 get a new hard register.  */
-      for (i = FIRST_PSEUDO_REGISTER; i < max_regno; i++)
+      for (i = FIRST_PSEUDO_REGISTER; i < (unsigned)max_regno; i++)
 	if (reg_old_renumber[i] != reg_renumber[i])
 	  {
 	    HARD_REG_SET forbidden;
@@ -3661,7 +3767,7 @@ finish_spills (int global)
     }
 
   /* Let alter_reg modify the reg rtx's for the modified pseudos.  */
-  for (i = FIRST_PSEUDO_REGISTER; i < max_regno; i++)
+  for (i = FIRST_PSEUDO_REGISTER; i < (unsigned)max_regno; i++)
     {
       int regno = reg_renumber[i];
       if (reg_old_renumber[i] == regno)
@@ -4593,7 +4699,7 @@ reload_reg_reaches_end_p (unsigned int regno, int opnum, enum reload_type type)
 
    This function uses the same algorithm as reload_reg_free_p above.  */
 
-int
+static int
 reloads_conflict (int r1, int r2)
 {
   enum reload_type r1_type = rld[r1].when_needed;
@@ -5411,19 +5517,18 @@ choose_reload_regs (struct insn_chain *chain)
 		    need_mode = mode;
 		  else
 		    need_mode
-		      = smallest_mode_for_size (GET_MODE_SIZE (mode) + byte,
+		      = smallest_mode_for_size (GET_MODE_BITSIZE (mode)
+						+ byte * BITS_PER_UNIT,
 						GET_MODE_CLASS (mode));
 
-		  if (
-#ifdef CANNOT_CHANGE_MODE_CLASS
-		      (!REG_CANNOT_CHANGE_MODE_P (i, GET_MODE (last_reg),
-						  need_mode)
-		       &&
-#endif
-		      (GET_MODE_SIZE (GET_MODE (last_reg))
+		  if ((GET_MODE_SIZE (GET_MODE (last_reg))
 		       >= GET_MODE_SIZE (need_mode))
 #ifdef CANNOT_CHANGE_MODE_CLASS
-		      )
+		      /* Verify that the register in "i" can be obtained
+			 from LAST_REG.  */
+		      && !REG_CANNOT_CHANGE_MODE_P (REGNO (last_reg),
+						    GET_MODE (last_reg),
+						    mode)
 #endif
 		      && reg_reloaded_contents[i] == regno
 		      && TEST_HARD_REG_BIT (reg_reloaded_valid, i)
@@ -5589,6 +5694,15 @@ choose_reload_regs (struct insn_chain *chain)
 		      gcc_assert (GET_CODE (equiv) == SUBREG);
 		      regno = subreg_regno (equiv);
 		      equiv = gen_rtx_REG (rld[r].mode, regno);
+		      /* If we choose EQUIV as the reload register, but the
+			 loop below decides to cancel the inheritance, we'll
+			 end up reloading EQUIV in rld[r].mode, not the mode
+			 it had originally.  That isn't safe when EQUIV isn't
+			 available as a spill register since its value might
+			 still be live at this point.  */
+		      for (i = regno; i < regno + (int) rld[r].nregs; i++)
+			if (TEST_HARD_REG_BIT (reload_reg_unavailable, i))
+			  equiv = 0;
 		    }
 		}
 
@@ -5596,13 +5710,13 @@ choose_reload_regs (struct insn_chain *chain)
 		 and of the desired class.  */
 	      if (equiv != 0)
 		{
+		  /* APPLE LOCAL begin don't reload unavailable hard regs. PR/16028 */
 		  int bad_for_class = 0;
 		  int max_regno = regno + rld[r].nregs;
 
 		  for (i = regno; i < max_regno; i++)
 		      bad_for_class |= ! TEST_HARD_REG_BIT (reg_class_contents[(int) rld[r].class],
 							   i);
-		  /* APPLE LOCAL begin don't reload unavailable hard regs. PR/16028 */
                   if (bad_for_class
                       || ! free_for_value_p (regno, rld[r].mode,
                                              rld[r].opnum, rld[r].when_needed,
@@ -6030,12 +6144,23 @@ merge_assigned_reloads (rtx insn)
 	     be merged and a RELOAD_FOR_OUTPUT_ADDRESS reload that loads the
 	     same value or a part of it; we must not change its type if there
 	     is a conflicting input.  */
+          /* APPLE LOCAL begin mainline 2007-04-24 5122634 */
+          /* It is possible that the RELOAD_FOR_OPERAND_ADDRESS
+             instruction is assigned the same register as the
+             earlier RELOAD_FOR_OTHER_ADDRESS instruction.
+             Merging these two instructions will cause the
+             RELOAD_FOR_OTHER_ADDRESS instruction to be deleted
+             later on. */
+          /* APPLE LOCAL end mainline 2007-04-24 5122634 */
 
 	  if (rld[i].when_needed == RELOAD_OTHER)
 	    for (j = 0; j < n_reloads; j++)
 	      if (rld[j].in != 0
 		  && rld[j].when_needed != RELOAD_OTHER
 		  && rld[j].when_needed != RELOAD_FOR_OTHER_ADDRESS
+                  /* APPLE LOCAL begin mainline 2007-04-24 5122634 */
+		  && rld[j].when_needed != RELOAD_FOR_OPERAND_ADDRESS
+                  /* APPLE LOCAL end mainline 2007-04-24 5122634 */
 		  && (! conflicting_input
 		      || rld[j].when_needed == RELOAD_FOR_INPUT_ADDRESS
 		      || rld[j].when_needed == RELOAD_FOR_INPADDR_ADDRESS)
@@ -6699,7 +6824,8 @@ emit_output_reload_insns (struct insn_chain *chain, struct reload *rl,
 	  || !(set = single_set (insn))
 	  || rtx_equal_p (old, SET_DEST (set))
 	  || !reg_mentioned_p (old, SET_SRC (set))
-	  || !regno_clobbered_p (REGNO (old), insn, rl->mode, 0))
+	  || !((REGNO (old) < FIRST_PSEUDO_REGISTER)
+	       && regno_clobbered_p (REGNO (old), insn, rl->mode, 0)))
 	gen_reload (old, reloadreg, rl->opnum,
 		    rl->when_needed);
     }
@@ -6815,6 +6941,10 @@ do_input_reload (struct insn_chain *chain, struct reload *rl, int j)
      actually no need to store the old value in it.  */
 
   if (optimize
+      /* Only attempt this for input reloads; for RELOAD_OTHER we miss
+	 that there may be multiple uses of the previous output reload.
+	 Restricting to RELOAD_FOR_INPUT is mostly paranoia.  */
+      && rl->when_needed == RELOAD_FOR_INPUT
       && (reload_inherited[j] || reload_override_in[j])
       && rl->reg_rtx
       && REG_P (rl->reg_rtx)
@@ -7329,7 +7459,7 @@ emit_reload_insns (struct insn_chain *chain)
 
    Returns first insn emitted.  */
 
-rtx
+static rtx
 gen_reload (rtx out, rtx in, int opnum, enum reload_type type)
 {
   rtx last = get_last_insn ();
@@ -7613,13 +7743,13 @@ delete_output_reload (rtx insn, int j, int last_reload_reg)
 
   /* If the pseudo-reg we are reloading is no longer referenced
      anywhere between the store into it and here,
-     and no jumps or labels intervene, then the value can get
-     here through the reload reg alone.
+     and we're within the same basic block, then the value can only
+     pass through the reload reg and end up here.
      Otherwise, give up--return.  */
   for (i1 = NEXT_INSN (output_reload_insn);
        i1 != insn; i1 = NEXT_INSN (i1))
     {
-      if (LABEL_P (i1) || JUMP_P (i1))
+      if (NOTE_INSN_BASIC_BLOCK_P (i1))
 	return;
       if ((NONJUMP_INSN_P (i1) || CALL_P (i1))
 	  && reg_mentioned_p (reg, PATTERN (i1)))

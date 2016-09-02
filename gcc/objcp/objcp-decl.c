@@ -1,4 +1,4 @@
-/* APPLE LOCAL file Objective-C++ */
+/* APPLE LOCAL file mainline */
 /* Process the ObjC-specific declarations and variables for 
    the Objective-C++ compiler.
    Copyright (C) 2001, 2004 Free Software Foundation, Inc.
@@ -52,9 +52,11 @@ objcp_start_struct (enum tree_code code ATTRIBUTE_UNUSED, tree name)
   /* The idea here is to mimic the actions that the C++ parser takes when
      constructing 'extern "C" struct NAME {'.  */
   push_lang_context (lang_name_c);
+
   if (!name)
     name = make_anon_name ();
-  s = xref_tag (record_type, name, false, 0);
+
+  s = xref_tag (record_type, name, ts_global, 0);
   CLASSTYPE_DECLARED_CLASS (s) = 0;  /* this is a 'struct', not a 'class'.  */
   xref_basetypes (s, NULL_TREE);     /* no base classes here!  */
 
@@ -73,6 +75,12 @@ objcp_finish_struct (tree t, tree fieldlist, tree attributes)
     finish_member_declaration (field);
   }
   t = finish_struct (t, attributes);
+  /* APPLE LOCAL begin radar 4291785 */
+  /* Check for duplicate ivars. */
+  field = fieldlist;
+  if (fieldlist && (fieldlist = objc_get_interface_ivars (fieldlist)) != field)
+    objc_detect_field_duplicates (fieldlist);
+  /* APPLE LOCAL end radar 4291785 */
   pop_lang_context ();
 
   return t;
@@ -95,16 +103,7 @@ objcp_lookup_name (tree name)
 tree
 objcp_xref_tag (enum tree_code code ATTRIBUTE_UNUSED, tree name)
 {
-  return xref_tag (record_type, name, true, false);
-}
-
-tree
-objcp_build_component_ref (tree datum, tree component)
-{
-  /* The 'build_component_ref' routine has been removed from the C++
-     front-end, but 'finish_class_member_access_expr' seems to be
-     a worthy substitute.  */
-  return finish_class_member_access_expr (datum, component);
+  return xref_tag (record_type, name, ts_global, false);
 }
 
 int

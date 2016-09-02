@@ -1,9 +1,10 @@
-/* APPLE LOCAL file Objective-C++ */
+/* APPLE LOCAL file mainline */
 /* Handle C++ scoping ('::') operators in ObjC message receivers gracefully.  */
 /* Author: Ziemowit Laski  <zlaski@apple.com> */
 /* { dg-do run } */
 
-#include <objc/Object.h>
+/* APPLE LOCAL radar 4894756 */
+#include "../objc/execute/Object2.h"
 #include <stdlib.h>
 
 @class Derived;
@@ -51,4 +52,3 @@ int main(void) {
 
   return 0;
 }
-

@@ -66,7 +66,7 @@ Boston, MA 02111-1307, USA.  */
 	  }								\
 	if (!TARGET_64BIT)						\
 	  builtin_define ("_ILP32");					\
-	if (flag_pa_unix >= 1995)					\
+	if (flag_pa_unix >= 1995 && !flag_iso)				\
 	  {								\
 	    builtin_define ("_XOPEN_UNIX");				\
 	    builtin_define ("_XOPEN_SOURCE_EXTENDED");			\
@@ -75,8 +75,11 @@ Boston, MA 02111-1307, USA.  */
 	  {								\
 	    if (flag_pa_unix >= 1998)					\
 	      {								\
-		builtin_define ("_INCLUDE__STDC_A1_SOURCE");		\
-		builtin_define ("_INCLUDE_XOPEN_SOURCE_500");		\
+		if (flag_isoc94 || flag_isoc99 || c_dialect_cxx()	\
+		    || !flag_iso)					\
+		  builtin_define ("_INCLUDE__STDC_A1_SOURCE");		\
+		if (!flag_iso)						\
+		  builtin_define ("_INCLUDE_XOPEN_SOURCE_500");		\
 	      }								\
 	    else if (flag_isoc94 || flag_isoc99 || c_dialect_cxx ())	\
 	      warning ("-munix=98 option required for C89 "		\
@@ -147,7 +150,9 @@ Boston, MA 02111-1307, USA.  */
 /* Under hpux11, the normal location of the `ld' and `as' programs is the
    /usr/ccs/bin directory.  */
 
-#ifndef CROSS_COMPILE
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#ifndef CROSS_DIRECTORY_STRUCTURE
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
 #undef MD_EXEC_PREFIX
 #define MD_EXEC_PREFIX "/usr/ccs/bin/"
 #endif
@@ -156,7 +161,9 @@ Boston, MA 02111-1307, USA.  */
    the /usr/ccs/lib directory.  However, the profiling files are in
    /opt/langtools/lib.  */
 
-#ifndef CROSS_COMPILE
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#ifndef CROSS_DIRECTORY_STRUCTURE
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
 #undef MD_STARTFILE_PREFIX
 #define MD_STARTFILE_PREFIX "/usr/ccs/lib/"
 #define MD_STARTFILE_PREFIX_1 "/opt/langtools/lib/"

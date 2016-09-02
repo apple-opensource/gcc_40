@@ -1,5 +1,6 @@
 /* Conditional constant propagation pass for the GNU compiler.
-   Copyright (C) 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+   Copyright (C) 2000, 2001, 2002, 2003, 2004, 2005
+   Free Software Foundation, Inc.
    Adapted from original RTL SSA-CCP by Daniel Berlin <dberlin@dberlin.org>
    Adapted to GIMPLE trees by Diego Novillo <dnovillo@redhat.com>
 
@@ -579,16 +580,18 @@ substitute_and_fold (void)
 	    {
 	      bool changed = fold_stmt (bsi_stmt_ptr (i));
 	      stmt = bsi_stmt(i);
+
 	      /* If we folded a builtin function, we'll likely
 		 need to rename VDEFs.  */
 	      if (replaced_address || changed)
-		{
-		  mark_new_vars_to_rename (stmt, vars_to_rename);
-		  if (maybe_clean_eh_stmt (stmt))
-		    tree_purge_dead_eh_edges (bb);
-		}
-	      else
-		modify_stmt (stmt);
+		mark_new_vars_to_rename (stmt, vars_to_rename);
+
+              /* If we cleaned up EH information from the statement,
+                 remove EH edges.  */
+	      if (maybe_clean_eh_stmt (stmt))
+		tree_purge_dead_eh_edges (bb);
+
+	      modify_stmt (stmt);
 	    }
 
 	  if (dump_file && (dump_flags & TDF_DETAILS))
@@ -847,9 +850,7 @@ ccp_fold (tree stmt)
 	    op0 = get_value (op0)->const_val;
 	}
 
-      retval = nondestructive_fold_unary_to_constant (code,
-		     				      TREE_TYPE (rhs),
-						      op0);
+      retval = fold_unary_to_constant (code, TREE_TYPE (rhs), op0);
 
       /* If we folded, but did not create an invariant, then we can not
 	 use this expression.  */
@@ -900,9 +901,7 @@ ccp_fold (tree stmt)
 	    op1 = val->const_val;
 	}
 
-      retval = nondestructive_fold_binary_to_constant (code,
-		     				       TREE_TYPE (rhs),
-						       op0, op1);
+      retval = fold_binary_to_constant (code, TREE_TYPE (rhs), op0, op1);
 
       /* If we folded, but did not create an invariant, then we can not
 	 use this expression.  */
@@ -1057,21 +1056,41 @@ visit_assignment (tree stmt, tree *output_p)
       val = *nval;
     }
   else
-    {
-      /* Evaluate the statement.  */
+    /* Evaluate the statement.  */
       val = evaluate_stmt (stmt);
-    }
 
-  /* FIXME: Hack.  If this was a definition of a bitfield, we need to widen
+  /* If the original LHS was a VIEW_CONVERT_EXPR, modify the constant
+     value to be a VIEW_CONVERT_EXPR of the old constant value.
+
+     ??? Also, if this was a definition of a bitfield, we need to widen
      the constant value into the type of the destination variable.  This
      should not be necessary if GCC represented bitfields properly.  */
   {
-    tree lhs = TREE_OPERAND (stmt, 0);
-    if (val.lattice_val == CONSTANT
-	&& TREE_CODE (lhs) == COMPONENT_REF
-	&& DECL_BIT_FIELD (TREE_OPERAND (lhs, 1)))
+    tree orig_lhs = TREE_OPERAND (stmt, 0);
+
+    if (TREE_CODE (orig_lhs) == VIEW_CONVERT_EXPR
+	&& val.lattice_val == CONSTANT)
       {
-	tree w = widen_bitfield (val.const_val, TREE_OPERAND (lhs, 1), lhs);
+	tree w = fold (build1 (VIEW_CONVERT_EXPR,
+			       TREE_TYPE (TREE_OPERAND (orig_lhs, 0)),
+			       val.const_val));
+
+	orig_lhs = TREE_OPERAND (orig_lhs, 1);
+	if (w && is_gimple_min_invariant (w))
+	  val.const_val = w;
+	else
+	  {
+	    val.lattice_val = VARYING;
+	    val.const_val = NULL;
+	  }
+      }
+
+    if (val.lattice_val == CONSTANT
+	&& TREE_CODE (orig_lhs) == COMPONENT_REF
+	&& DECL_BIT_FIELD (TREE_OPERAND (orig_lhs, 1)))
+      {
+	tree w = widen_bitfield (val.const_val, TREE_OPERAND (orig_lhs, 1),
+				 orig_lhs);
 
 	if (w && is_gimple_min_invariant (w))
 	  val.const_val = w;
@@ -1120,7 +1139,7 @@ visit_cond_stmt (tree stmt, edge *taken_edge_p)
      to the worklist.  If no single edge can be determined statically,
      return SSA_PROP_VARYING to feed all the outgoing edges to the
      propagation engine.  */
-  *taken_edge_p = find_taken_edge (block, val.const_val);
+  *taken_edge_p = val.const_val ? find_taken_edge (block, val.const_val) : 0;
   if (*taken_edge_p)
     return SSA_PROP_INTERESTING;
   else
@@ -1272,9 +1291,8 @@ widen_bitfield (tree val, tree field, tree var)
       for (i = 0, mask = 0; i < field_size; i++)
 	mask |= ((HOST_WIDE_INT) 1) << i;
 
-      wide_val = build (BIT_AND_EXPR, TREE_TYPE (var), val, 
-			fold_convert (TREE_TYPE (var),
-				      build_int_cst (NULL_TREE, mask)));
+      wide_val = build2 (BIT_AND_EXPR, TREE_TYPE (var), val, 
+			 build_int_cst (TREE_TYPE (var), mask));
     }
   else
     {
@@ -1284,9 +1302,8 @@ widen_bitfield (tree val, tree field, tree var)
       for (i = 0, mask = 0; i < (var_size - field_size); i++)
 	mask |= ((HOST_WIDE_INT) 1) << (var_size - i - 1);
 
-      wide_val = build (BIT_IOR_EXPR, TREE_TYPE (var), val,
-			fold_convert (TREE_TYPE (var),
-				      build_int_cst (NULL_TREE, mask)));
+      wide_val = build2 (BIT_IOR_EXPR, TREE_TYPE (var), val,
+			 build_int_cst (TREE_TYPE (var), mask));
     }
 
   return fold (wide_val);
@@ -1437,45 +1454,39 @@ maybe_fold_offset_to_component_ref (tree record_type, tree base, tree offset,
 	continue;
 
       field_type = TREE_TYPE (f);
-      if (cmp < 0)
-	{
-	  /* Don't care about offsets into the middle of scalars.  */
-	  if (!AGGREGATE_TYPE_P (field_type))
-	    continue;
-
-	  /* Check for array at the end of the struct.  This is often
-	     used as for flexible array members.  We should be able to
-	     turn this into an array access anyway.  */
-	  if (TREE_CODE (field_type) == ARRAY_TYPE)
-	    tail_array_field = f;
-
-	  /* Check the end of the field against the offset.  */
-	  if (!DECL_SIZE_UNIT (f)
-	      || TREE_CODE (DECL_SIZE_UNIT (f)) != INTEGER_CST)
-	    continue;
-	  t = int_const_binop (MINUS_EXPR, offset, DECL_FIELD_OFFSET (f), 1);
-	  if (!tree_int_cst_lt (t, DECL_SIZE_UNIT (f)))
-	    continue;
-
-	  /* If we matched, then set offset to the displacement into
-	     this field.  */
-	  offset = t;
-	}
 
       /* Here we exactly match the offset being checked.  If the types match,
 	 then we can return that field.  */
-      else if (lang_hooks.types_compatible_p (orig_type, field_type))
+      if (cmp == 0
+	  && lang_hooks.types_compatible_p (orig_type, field_type))
 	{
 	  if (base_is_ptr)
 	    base = build1 (INDIRECT_REF, record_type, base);
 	  t = build (COMPONENT_REF, field_type, base, f, NULL_TREE);
 	  return t;
 	}
+      
+      /* Don't care about offsets into the middle of scalars.  */
+      if (!AGGREGATE_TYPE_P (field_type))
+	continue;
 
-      /* Don't care about type-punning of scalars.  */
-      else if (!AGGREGATE_TYPE_P (field_type))
-	return NULL_TREE;
+      /* Check for array at the end of the struct.  This is often
+	 used as for flexible array members.  We should be able to
+	 turn this into an array access anyway.  */
+      if (TREE_CODE (field_type) == ARRAY_TYPE)
+	tail_array_field = f;
 
+      /* Check the end of the field against the offset.  */
+      if (!DECL_SIZE_UNIT (f)
+	  || TREE_CODE (DECL_SIZE_UNIT (f)) != INTEGER_CST)
+	continue;
+      t = int_const_binop (MINUS_EXPR, offset, field_offset, 1);
+      if (!tree_int_cst_lt (t, DECL_SIZE_UNIT (f)))
+	continue;
+
+      /* If we matched, then set offset to the displacement into
+	 this field.  */
+      offset = t;
       goto found;
     }
 
@@ -1484,6 +1495,7 @@ maybe_fold_offset_to_component_ref (tree record_type, tree base, tree offset,
 
   f = tail_array_field;
   field_type = TREE_TYPE (f);
+  offset = int_const_binop (MINUS_EXPR, offset, byte_position (f), 1);
 
  found:
   /* If we get here, we've got an aggregate field, and a possibly 
@@ -1806,25 +1818,50 @@ fold_stmt_r (tree *expr_p, int *walk_subtrees, void *data)
   return NULL_TREE;
 }
 
-
-/* Return the string length of ARG in LENGTH.  If ARG is an SSA name variable,
-   follow its use-def chains.  If LENGTH is not NULL and its value is not
-   equal to the length we determine, or if we are unable to determine the
-   length, return false.  VISITED is a bitmap of visited variables.  */
+/* APPLE LOCAL begin mainline */
+/* Return the string length, maximum string length or maximum value of
+   ARG in LENGTH.
+   If ARG is an SSA name variable, follow its use-def chains.  If LENGTH
+   is not NULL and, for TYPE == 0, its value is not equal to the length
+   we determine or if we are unable to determine the length or value,
+   return false.  VISITED is a bitmap of visited variables.
+   TYPE is 0 if string length should be returned, 1 for maximum string
+   length and 2 for maximum value ARG can have.  */
 
 static bool
-get_strlen (tree arg, tree *length, bitmap visited)
+get_maxval_strlen (tree arg, tree *length, bitmap visited, int type)
 {
   tree var, def_stmt, val;
   
   if (TREE_CODE (arg) != SSA_NAME)
     {
+      if (type == 2)
+        {
+          val = arg;
+          if (TREE_CODE (val) != INTEGER_CST
+              || tree_int_cst_sgn (val) < 0)
+            return false;
+        }
+      else
       val = c_strlen (arg, 1);
       if (!val)
 	return false;
 
-      if (*length && simple_cst_equal (val, *length) != 1)
+      if (*length)
+        {
+          if (type > 0)
+            {
+              if (TREE_CODE (*length) != INTEGER_CST
+                  || TREE_CODE (val) != INTEGER_CST)
 	return false;
+
+              if (tree_int_cst_lt (*length, val))
+                *length = val;
+              return true;
+            }
+          else if (simple_cst_equal (val, *length) != 1)
+            return false;
+        }
 
       *length = val;
       return true;
@@ -1842,28 +1879,14 @@ get_strlen (tree arg, tree *length, bitmap visited)
     {
       case MODIFY_EXPR:
 	{
-	  tree len, rhs;
+          tree rhs;
 	  
 	  /* The RHS of the statement defining VAR must either have a
 	     constant length or come from another SSA_NAME with a constant
 	     length.  */
 	  rhs = TREE_OPERAND (def_stmt, 1);
 	  STRIP_NOPS (rhs);
-	  if (TREE_CODE (rhs) == SSA_NAME)
-	    return get_strlen (rhs, length, visited);
-
-	  /* See if the RHS is a constant length.  */
-	  len = c_strlen (rhs, 1);
-	  if (len)
-	    {
-	      if (*length && simple_cst_equal (len, *length) != 1)
-		return false;
-
-	      *length = len;
-	      return true;
-	    }
-
-	  break;
+          return get_maxval_strlen (rhs, length, visited, type);
 	}
 
       case PHI_NODE:
@@ -1885,7 +1908,7 @@ get_strlen (tree arg, tree *length, bitmap visited)
 	      if (arg == PHI_RESULT (def_stmt))
 		continue;
 
-	      if (!get_strlen (arg, length, visited))
+              if (!get_maxval_strlen (arg, length, visited, type))
 		return false;
 	    }
 
@@ -1900,16 +1923,15 @@ get_strlen (tree arg, tree *length, bitmap visited)
   return false;
 }
 
-
 /* Fold builtin call FN in statement STMT.  If it cannot be folded into a
    constant, return NULL_TREE.  Otherwise, return its constant value.  */
 
 static tree
 ccp_fold_builtin (tree stmt, tree fn)
 {
-  tree result, strlen_val[2];
+  tree result, val[3];
   tree callee, arglist, a;
-  int strlen_arg, i;
+  int arg_mask, i, type;
   bitmap visited;
   bool ignore;
 
@@ -1917,6 +1939,8 @@ ccp_fold_builtin (tree stmt, tree fn)
 
   /* First try the generic builtin folder.  If that succeeds, return the
      result directly.  */
+  callee = get_callee_fndecl (fn);
+  arglist = TREE_OPERAND (fn, 1);
   result = fold_builtin (fn, ignore);
   if (result)
   {
@@ -1926,13 +1950,11 @@ ccp_fold_builtin (tree stmt, tree fn)
   }
 
   /* Ignore MD builtins.  */
-  callee = get_callee_fndecl (fn);
   if (DECL_BUILT_IN_CLASS (callee) == BUILT_IN_MD)
     return NULL_TREE;
 
   /* If the builtin could not be folded, and it has no argument list,
      we're done.  */
-  arglist = TREE_OPERAND (fn, 1);
   if (!arglist)
     return NULL_TREE;
 
@@ -1942,39 +1964,59 @@ ccp_fold_builtin (tree stmt, tree fn)
     case BUILT_IN_STRLEN:
     case BUILT_IN_FPUTS:
     case BUILT_IN_FPUTS_UNLOCKED:
-      strlen_arg = 1;
+      arg_mask = 1;
+      type = 0;
       break;
     case BUILT_IN_STRCPY:
     case BUILT_IN_STRNCPY:
-      strlen_arg = 2;
+      arg_mask = 2;
+      type = 0;
+      break;
+    case BUILT_IN_MEMCPY_CHK:
+    case BUILT_IN_MEMPCPY_CHK:
+    case BUILT_IN_MEMMOVE_CHK:
+    case BUILT_IN_MEMSET_CHK:
+    case BUILT_IN_STRNCPY_CHK:
+      arg_mask = 4;
+      type = 2;
+      break;
+    case BUILT_IN_STRCPY_CHK:
+    case BUILT_IN_STPCPY_CHK:
+      arg_mask = 2;
+      type = 1;
+      break;
+    case BUILT_IN_SNPRINTF_CHK:
+    case BUILT_IN_VSNPRINTF_CHK:
+      arg_mask = 2;
+      type = 2;
       break;
     default:
       return NULL_TREE;
     }
 
   /* Try to use the dataflow information gathered by the CCP process.  */
-  visited = BITMAP_XMALLOC ();
+  visited = BITMAP_ALLOC (NULL);
 
-  memset (strlen_val, 0, sizeof (strlen_val));
+  memset (val, 0, sizeof (val));
   for (i = 0, a = arglist;
-       strlen_arg;
-       i++, strlen_arg >>= 1, a = TREE_CHAIN (a))
-    if (strlen_arg & 1)
+       arg_mask;
+       i++, arg_mask >>= 1, a = TREE_CHAIN (a))
+    if (arg_mask & 1)
       {
 	bitmap_clear (visited);
-	if (!get_strlen (TREE_VALUE (a), &strlen_val[i], visited))
-	  strlen_val[i] = NULL_TREE;
+        if (!get_maxval_strlen (TREE_VALUE (a), &val[i], visited, type))
+          val[i] = NULL_TREE;
       }
 
-  BITMAP_XFREE (visited);
+  BITMAP_FREE (visited);
 
   result = NULL_TREE;
   switch (DECL_FUNCTION_CODE (callee))
     {
     case BUILT_IN_STRLEN:
-      if (strlen_val[0])
+      if (val[0])
 	{
-	  tree new = fold_convert (TREE_TYPE (fn), strlen_val[0]);
+          tree new = fold_convert (TREE_TYPE (fn), val[0]);
 
 	  /* If the result is not a valid gimple value, or not a cast
 	     of a valid gimple value, then we can not use the result.  */
@@ -1986,25 +2028,53 @@ ccp_fold_builtin (tree stmt, tree fn)
       break;
 
     case BUILT_IN_STRCPY:
-      if (strlen_val[1] && is_gimple_val (strlen_val[1]))
-        result = fold_builtin_strcpy (fn, strlen_val[1]);
+      if (val[1] && is_gimple_val (val[1]))
+        result = fold_builtin_strcpy (fn, val[1]);
       break;
 
     case BUILT_IN_STRNCPY:
-      if (strlen_val[1] && is_gimple_val (strlen_val[1]))
-	result = fold_builtin_strncpy (fn, strlen_val[1]);
+      if (val[1] && is_gimple_val (val[1]))
+        result = fold_builtin_strncpy (fn, val[1]);
       break;
 
     case BUILT_IN_FPUTS:
       result = fold_builtin_fputs (arglist,
 				   TREE_CODE (stmt) != MODIFY_EXPR, 0,
-				   strlen_val[0]);
+                                   val[0]);
       break;
 
     case BUILT_IN_FPUTS_UNLOCKED:
       result = fold_builtin_fputs (arglist,
 				   TREE_CODE (stmt) != MODIFY_EXPR, 1,
-				   strlen_val[0]);
+                                   val[0]);
+      break;
+
+    case BUILT_IN_MEMCPY_CHK:
+    case BUILT_IN_MEMPCPY_CHK:
+    case BUILT_IN_MEMMOVE_CHK:
+    case BUILT_IN_MEMSET_CHK:
+      if (val[2] && is_gimple_val (val[2]))
+        result = fold_builtin_memory_chk (callee, arglist, val[2], ignore,
+                                          DECL_FUNCTION_CODE (callee));
+      break;
+
+    case BUILT_IN_STRCPY_CHK:
+    case BUILT_IN_STPCPY_CHK:
+      if (val[1] && is_gimple_val (val[1]))
+	result = fold_builtin_stxcpy_chk (callee, arglist, val[1], ignore,
+                                          DECL_FUNCTION_CODE (callee));
+      break;
+
+    case BUILT_IN_STRNCPY_CHK:
+      if (val[2] && is_gimple_val (val[2]))
+        result = fold_builtin_strncpy_chk (arglist, val[2]);
+      break;
+
+    case BUILT_IN_SNPRINTF_CHK:
+    case BUILT_IN_VSNPRINTF_CHK:
+      if (val[1] && is_gimple_val (val[1]))
+        result = fold_builtin_snprintf_chk (arglist, val[1],
+                                            DECL_FUNCTION_CODE (callee));
       break;
 
     default:
@@ -2016,7 +2086,7 @@ ccp_fold_builtin (tree stmt, tree fn)
   return result;
 }
 
-
+/* APPLE LOCAL end mainline */
 /* Fold the statement pointed by STMT_P.  In some cases, this function may
    replace the whole statement with a new one.  Returns true iff folding
    makes any changes.  */

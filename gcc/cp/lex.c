@@ -175,7 +175,7 @@ struct resword
    _true_.  */
 #define D_EXT		0x01	/* GCC extension */
 #define D_ASM		0x02	/* in C99, but has a switch to turn it off */
-/* APPLE LOCAL Objective-C++ */
+/* APPLE LOCAL mainline */
 #define D_OBJC		0x08	/* Objective C++ only */
 
 CONSTRAINT(ridbits_fit, RID_LAST_MODIFIER < sizeof(unsigned long) * CHAR_BIT);
@@ -183,6 +183,8 @@ CONSTRAINT(ridbits_fit, RID_LAST_MODIFIER < sizeof(unsigned long) * CHAR_BIT);
 static const struct resword reswords[] =
 {
   { "_Complex",		RID_COMPLEX,	0 },
+  /* APPLE LOCAL CW asm blocks */
+  { "_asm",		RID_ASM,	0 },
   { "__FUNCTION__",	RID_FUNCTION_NAME, 0 },
   { "__PRETTY_FUNCTION__", RID_PRETTY_FUNCTION_NAME, 0 },
   { "__alignof", 	RID_ALIGNOF,	0 },
@@ -283,7 +285,7 @@ static const struct resword reswords[] =
   { "wchar_t",          RID_WCHAR,	0 },
   { "while",		RID_WHILE,	0 },
 
-  /* APPLE LOCAL begin Objective-C++ */
+  /* APPLE LOCAL begin mainline */
   /* The remaining keywords are specific to Objective-C++.  NB:
      All of them will remain _disabled_, since they are context-
      sensitive.  */
@@ -298,6 +300,12 @@ static const struct resword reswords[] =
   { "end",		RID_AT_END,		D_OBJC },
   { "implementation",	RID_AT_IMPLEMENTATION,	D_OBJC },
   { "interface",	RID_AT_INTERFACE,	D_OBJC },
+  /* APPLE LOCAL C* language */
+  { "optional",         RID_AT_OPTIONAL,        D_OBJC },
+  /* APPLE LOCAL C* language */
+  { "required",         RID_AT_REQUIRED,        D_OBJC },
+  /* APPLE LOCAL C* property (Radar 4436866) */
+  { "property",		RID_AT_PROPERTY,	D_OBJC },
   { "protocol",		RID_AT_PROTOCOL,	D_OBJC },
   { "selector",		RID_AT_SELECTOR,	D_OBJC },
   { "finally",		RID_AT_FINALLY,		D_OBJC },
@@ -309,7 +317,29 @@ static const struct resword reswords[] =
   { "inout",		RID_INOUT,		D_OBJC },
   { "oneway",		RID_ONEWAY,		D_OBJC },
   { "out",		RID_OUT,		D_OBJC },
-  /* APPLE LOCAL end Objective-C++ */
+  /* APPLE LOCAL end mainline */
+  /* APPLE LOCAL begin C* property (Radar 4436866) */
+  /* These are recognized inside a property attribute list */
+  { "readonly",         RID_READONLY,           D_OBJC },
+  /* APPLE LOCAL Radar 4591909 */
+  { "dynamic",          RID_DYNAMIC,            D_OBJC },
+  { "getter",           RID_GETTER,             D_OBJC },
+  { "setter",           RID_SETTER,             D_OBJC },
+  { "ivar",             RID_IVAR,               D_OBJC },
+  /* APPLE LOCAL radar 4621020 */
+  { "weak",             RID_WEAK,               D_OBJC },
+  /* APPLE LOCAL end C* property (Radar 4436866) */
+  /* APPLE LOCAL begin objc new property */
+  { "synthesize",       RID_AT_SYNTHESIZE,   D_OBJC },
+  { "readwrite",        RID_READWRITE,    D_OBJC },
+  { "assign",           RID_ASSIGN,       D_OBJC },
+  { "retain",           RID_RETAIN,       D_OBJC },
+  { "copy",             RID_COPY,         D_OBJC },
+  /* APPLE LOCAL end objc new property */
+  /* APPLE LOCAL radar 4947014 - objc atomic property */
+  { "nonatomic",       RID_NONATOMIC,          D_OBJC },
+  /* APPLE LOCAL radar 4564694 */
+  { "package",             RID_AT_PACKAGE,         D_OBJC },
 };
 
 void
@@ -318,15 +348,18 @@ init_reswords (void)
   unsigned int i;
   tree id;
   int mask = ((flag_no_asm ? D_ASM : 0)
-	      | (flag_no_gnu_keywords ? D_EXT : 0)
-	      /* APPLE LOCAL Objective-C++ */
-	      | D_OBJC);
+	      /* APPLE LOCAL mainline */
+	      | D_OBJC
+	      | (flag_no_gnu_keywords ? D_EXT : 0));
 
   ridpointers = ggc_calloc ((int) RID_MAX, sizeof (tree));
   for (i = 0; i < ARRAY_SIZE (reswords); i++)
     {
       id = get_identifier (reswords[i].word);
-      C_RID_CODE (id) = reswords[i].rid;
+      /* APPLE LOCAL begin objc new property */
+      C_RID_CODE (id) = (!flag_objc_new_property || reswords[i].rid != RID_DYNAMIC)
+			? reswords[i].rid : RID_AT_DYNAMIC;
+      /* APPLE LOCAL end objc new property */
       ridpointers [(int) reswords[i].rid] = id;
       if (! (reswords[i].disable & mask))
 	C_IS_RESERVED_WORD (id) = 1;
@@ -399,11 +432,6 @@ cxx_init (void)
   class_type_node = ridpointers[(int) RID_CLASS];
 
   cxx_init_decl_processing ();
-
-  /* Create the built-in __null node.  It is important that this is
-     not shared. */
-  null_node = make_node (INTEGER_CST);
-  TREE_TYPE (null_node) = c_common_type_for_size (POINTER_SIZE, 0);
 
   /* The fact that G++ uses COMDAT for many entities (inline
      functions, template instantiations, virtual tables, etc.) mean
@@ -622,7 +650,10 @@ unqualified_name_lookup_error (tree name)
     }
   else
     {
-      error ("%qD was not declared in this scope", name);
+      /* APPLE LOCAL begin radar 4133425 */
+      if (!objc_diagnose_private_ivar (name))
+        error ("%qD was not declared in this scope", name);
+      /* APPLE LOCAL end radar 4133425 */
       /* Prevent repeated error messages by creating a VAR_DECL with
 	 this NAME in the innermost block scope.  */
       if (current_function_decl)
@@ -668,8 +699,8 @@ unqualified_fn_lookup_error (tree name)
 	  static bool hint;
 	  if (!hint)
 	    {
-	      error ("(if you use `-fpermissive', G++ will accept your code, "
-		     "but allowing the use of an undeclared name is "
+	      error ("(if you use %<-fpermissive%>, G++ will accept your "
+		     "code, but allowing the use of an undeclared name is "
 		     "deprecated)");
 	      hint = true;
 	    }
@@ -847,21 +878,4 @@ make_aggr_type (enum tree_code code)
     SET_IS_AGGR_TYPE (t, 1);
 
   return t;
-}
-
-/* Return the type-qualifier corresponding to the identifier given by
-   RID.  */
-
-int
-cp_type_qual_from_rid (tree rid)
-{
-  if (rid == ridpointers[(int) RID_CONST])
-    return TYPE_QUAL_CONST;
-  else if (rid == ridpointers[(int) RID_VOLATILE])
-    return TYPE_QUAL_VOLATILE;
-  else if (rid == ridpointers[(int) RID_RESTRICT])
-    return TYPE_QUAL_RESTRICT;
-
-  gcc_unreachable ();
-  return TYPE_UNQUALIFIED;
 }

@@ -30,6 +30,8 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "intl.h"
 #include "diagnostic.h"
 #include "langhooks.h"
+/* APPLE LOCAL radar 4985544 - radar 5096648 */
+#include "tm_p.h"
 #include "c-format.h"
 
 /* Set format warning options according to a -Wformat=n option.  */
@@ -61,7 +63,12 @@ enum format_type { printf_format_type, asm_fprintf_format_type,
 		   gcc_diag_format_type, gcc_cdiag_format_type,
 		   gcc_cxxdiag_format_type,
 		   scanf_format_type, strftime_format_type,
-		   strfmon_format_type, format_type_error = -1};
+		   /* APPLE LOCAL begin radar 4985544 */
+		   strfmon_format_type, nsstring_format_type, 
+		   /* APPLE LOCAL radar 5096648 */
+		   cfstring_format_type,
+		   format_type_error = -1};
+		   /* APPLE LOCAL end radar 4985544 */
 
 typedef struct function_format_info
 {
@@ -139,7 +146,7 @@ check_format_string (tree argument, unsigned HOST_WIDE_INT format_num,
 	  != char_type_node))
     {
       if (!(flags & (int) ATTR_FLAG_BUILT_IN))
-	error ("format string arg not a string type");
+	error ("format string argument not a string type");
       *no_add_attrs = true;
       return false;
     }
@@ -196,7 +203,11 @@ decode_format_attr (tree args, function_format_info *info, int validated_p)
 
       info->format_type = decode_format_type (p);
 
-      if (info->format_type == format_type_error)
+      /* APPLE LOCAL begin radar 4985544 */
+      if (info->format_type == format_type_error
+	  || (info->format_type == nsstring_format_type 
+	      && !c_dialect_objc ()))
+      /* APPLE LOCAL end radar 4985544 */
 	{
 	  gcc_assert (!validated_p);
 	  warning ("%qs is an unrecognized format function type", p);
@@ -212,14 +223,14 @@ decode_format_attr (tree args, function_format_info *info, int validated_p)
 
   if (!get_constant (first_arg_num_expr, &info->first_arg_num, validated_p))
     {
-      error ("'...' has invalid operand number");
+      error ("%<...%> has invalid operand number");
       return false;
     }
 
   if (info->first_arg_num != 0 && info->first_arg_num <= info->format_num)
     {
       gcc_assert (!validated_p);
-      error ("format string arg follows the args to be formatted");
+      error ("format string argument follows the args to be formatted");
       return false;
     }
 
@@ -696,7 +707,21 @@ static const format_kind_info format_types_orig[] =
     strfmon_flag_specs, strfmon_flag_pairs,
     FMT_FLAG_ARG_CONVERT, 'w', '#', 'p', 0, 'L',
     NULL, NULL
+  /* APPLE LOCAL begin radar 4985544 */
+  },
+  { "NSString",   NULL,  NULL, NULL, NULL, 
+    NULL, NULL, 
+    FMT_FLAG_ARG_CONVERT, 0, 0, 0, 0, 0,
+    NULL, NULL
+  },
+  /* APPLE LOCAL end radar 4985544 */
+  /* APPLE LOCAL begin radar 5096648 */
+  { "CFString",   NULL,  NULL, NULL, NULL, 
+    NULL, NULL, 
+    FMT_FLAG_ARG_CONVERT, 0, 0, 0, 0, 0,
+    NULL, NULL
   }
+  /* APPLE LOCAL end radar 5096648 */
 };
 
 /* This layer of indirection allows GCC to reassign format_types with
@@ -1094,6 +1119,34 @@ get_flag_spec (const format_flag_spec *spec, int flag, const char *predicates)
 }
 
 
+/* APPLE LOCAL begin radar 4985544 - radar 5096648 */
+/* This routine checks to see if FORMAT_TREE is a valid CFString format, such as
+   @"any-string@". */
+
+static void
+objc_check_cfformat_arg (void *ctx, tree format_tree,
+                         unsigned HOST_WIDE_INT ARG_UNUSED (arg_num))
+{
+  format_check_results *res = ((format_check_context *)ctx)->res;
+
+  if (TREE_CODE (format_tree) != ADDR_EXPR)
+    {
+      res->number_non_literal++;
+      return;
+    }
+#ifdef CFSTRING_TYPE_NODE
+  /* check that format_tree is a valid CFString format, @"any-string@". */
+  format_tree = TREE_OPERAND (format_tree, 0);
+  if (TREE_CODE (format_tree) != CONST_DECL
+      || !CFSTRING_TYPE_NODE (TREE_TYPE (format_tree)))
+#endif
+    {
+      res->number_non_literal++;
+      return;
+    }
+}
+/* APPLE LOCAL end radar 4985544 - radar 5096648 */
+
 /* Check the argument list of a call to printf, scanf, etc.
    INFO points to the function_format_info structure.
    PARAMS is the list of argument values.  */
@@ -1132,8 +1185,15 @@ check_format_info (function_format_info *info, tree params)
   format_ctx.info = info;
   format_ctx.params = params;
 
-  check_function_arguments_recurse (check_format_arg, &format_ctx,
+  /* APPLE LOCAL begin radar 4985544 - radar 5096648 */
+  check_function_arguments_recurse (
+				    ((c_dialect_objc () 
+				      && info->format_type == nsstring_format_type) 
+				     || info->format_type == cfstring_format_type)
+				    ? objc_check_cfformat_arg 
+				    : check_format_arg, &format_ctx,
 				    format_tree, arg_num);
+  /* APPLE LOCAL end radar 4985544 - radar 5096648 */
 
   if (res.number_non_literal > 0)
     {
@@ -2069,7 +2129,7 @@ check_format_types (format_wanted_type *types, const char *format_start,
 		  && i == 0
 		  && cur_param != 0
 		  && integer_zerop (cur_param))
-		warning ("writing through null pointer (arg %d)",
+		warning ("writing through null pointer (argument %d)",
 			 arg_num);
 
 	      /* Check for reading through a NULL pointer.  */
@@ -2077,7 +2137,7 @@ check_format_types (format_wanted_type *types, const char *format_start,
 		  && i == 0
 		  && cur_param != 0
 		  && integer_zerop (cur_param))
-		warning ("reading through null pointer (arg %d)",
+		warning ("reading through null pointer (argument %d)",
 			 arg_num);
 
 	      if (cur_param != 0 && TREE_CODE (cur_param) == ADDR_EXPR)
@@ -2097,7 +2157,8 @@ check_format_types (format_wanted_type *types, const char *format_start,
 			  && (CONSTANT_CLASS_P (cur_param)
 			      || (DECL_P (cur_param)
 				  && TREE_READONLY (cur_param))))))
-		warning ("writing into constant object (arg %d)", arg_num);
+		warning ("writing into constant object (argument %d)",
+			 arg_num);
 
 	      /* If there are extra type qualifiers beyond the first
 		 indirection, then this makes the types technically
@@ -2107,7 +2168,8 @@ check_format_types (format_wanted_type *types, const char *format_start,
 		  && (TYPE_READONLY (cur_type)
 		      || TYPE_VOLATILE (cur_type)
 		      || TYPE_RESTRICT (cur_type)))
-		warning ("extra type qualifiers in format argument (arg %d)",
+		warning ("extra type qualifiers in format argument "
+			 "(argument %d)",
 			 arg_num);
 
 	    }
@@ -2214,6 +2276,8 @@ format_type_warning (const char *descr, const char *format_start,
       memset (p + 1, '*', pointer_count);
       p[pointer_count + 1] = 0;
     }
+  /* APPLE LOCAL radar 4529765 */
+  arg_num = objc_message_selector () ? (arg_num-2) : arg_num;
   if (wanted_type_name)
     {
       if (descr)
@@ -2287,9 +2351,25 @@ init_dynamic_asm_fprintf_info (void)
 	 HOST_WIDE_INT __gcc_host_wide_int__;" in one's source code
 	 prior to using that modifier.  */
       hwi = maybe_get_identifier ("__gcc_host_wide_int__");
+      if (!hwi)
+	{
+	  error ("%<__gcc_host_wide_int__%> is not defined as a type");
+	  return;
+	}
+      hwi = identifier_global_value (hwi);
+      if (!hwi || TREE_CODE (hwi) != TYPE_DECL)
+	{
+	  error ("%<__gcc_host_wide_int__%> is not defined as a type");
+	  return;
+	}
+      hwi = DECL_ORIGINAL_TYPE (hwi);
       gcc_assert (hwi);
-      hwi = DECL_ORIGINAL_TYPE (identifier_global_value (hwi));
-      gcc_assert (hwi);
+      if (hwi != long_integer_type_node && hwi != long_long_integer_type_node)
+	{
+	  error ("%<__gcc_host_wide_int__%> is not defined as %<long%>"
+		 " or %<long long%>");
+	  return;
+	}
 
       /* Create a new (writable) copy of asm_fprintf_length_specs.  */
       new_asm_fprintf_length_specs = (format_length_info *)
@@ -2333,19 +2413,70 @@ init_dynamic_diag_info (void)
 	 However we don't force a hard ICE because we may see only one
 	 or the other type.  */
       if ((loc = maybe_get_identifier ("location_t")))
-	loc = TREE_TYPE (identifier_global_value (loc));
+	{
+	  loc = identifier_global_value (loc);
+	  if (loc)
+	    {
+	      if (TREE_CODE (loc) != TYPE_DECL)
+		{
+		  error ("%<location_t%> is not defined as a type");
+		  loc = 0;
+		}
+	      else
+		loc = TREE_TYPE (loc);
+	    }
+	}
 
       /* We need to grab the underlying 'union tree_node' so peek into
 	 an extra type level.  */
       if ((t = maybe_get_identifier ("tree")))
-	t = TREE_TYPE (TREE_TYPE (identifier_global_value (t)));
+	{
+	  t = identifier_global_value (t);
+	  if (t)
+	    {
+	      if (TREE_CODE (t) != TYPE_DECL)
+		{
+		  error ("%<tree%> is not defined as a type");
+		  t = 0;
+		}
+	      else if (TREE_CODE (TREE_TYPE (t)) != POINTER_TYPE)
+		{
+		  error ("%<tree%> is not defined as a pointer type");
+		  t = 0;
+		}
+	      else
+		t = TREE_TYPE (TREE_TYPE (t));
+	    }
+	}
     
       /* Find the underlying type for HOST_WIDE_INT.  For the %w
 	 length modifier to work, one must have issued: "typedef
 	 HOST_WIDE_INT __gcc_host_wide_int__;" in one's source code
 	 prior to using that modifier.  */
       if ((hwi = maybe_get_identifier ("__gcc_host_wide_int__")))
-	hwi = DECL_ORIGINAL_TYPE (identifier_global_value (hwi));
+	{
+	  hwi = identifier_global_value (hwi);
+	  if (hwi)
+	    {
+	      if (TREE_CODE (hwi) != TYPE_DECL)
+		{
+		  error ("%<__gcc_host_wide_int__%> is not defined as a type");
+		  hwi = 0;
+		}
+	      else
+		{
+		  hwi = DECL_ORIGINAL_TYPE (hwi);
+		  gcc_assert (hwi);
+		  if (hwi != long_integer_type_node
+		      && hwi != long_long_integer_type_node)
+		    {
+		      error ("%<__gcc_host_wide_int__%> is not defined"
+			     " as %<long%> or %<long long%>");
+		      hwi = 0;
+		    }
+		}
+	    }
+	}
       
       /* Assign the new data for use.  */
 
@@ -2480,9 +2611,24 @@ handle_format_attribute (tree *node, tree ARG_UNUSED (name), tree args,
   argument = TYPE_ARG_TYPES (type);
   if (argument)
     {
-      if (!check_format_string (argument, info.format_num, flags,
-				no_add_attrs))
-	return NULL_TREE;
+      /* APPLE LOCAL begin radar 4985544 - radar 5096648 */
+      if (c_dialect_objc () && info.format_type == nsstring_format_type)
+	{
+	  if (!objc_check_format_nsstring (argument, info.format_num, no_add_attrs))
+	    return NULL;
+	}
+#ifdef CHECK_FORMAT_CFSTRING
+      else if (info.format_type == cfstring_format_type)
+	{
+	  if (!CHECK_FORMAT_CFSTRING (argument, info.format_num, no_add_attrs))
+	    return NULL;
+	}
+#endif
+      else
+        if (!check_format_string (argument, info.format_num, flags,
+				  no_add_attrs))
+	  return NULL_TREE;
+      /* APPLE LOCAL end radar 4985544 - radar 5096648 */
 
       if (info.first_arg_num != 0)
 	{
@@ -2496,7 +2642,7 @@ handle_format_attribute (tree *node, tree ARG_UNUSED (name), tree args,
 	  if (arg_num != info.first_arg_num)
 	    {
 	      if (!(flags & (int) ATTR_FLAG_BUILT_IN))
-		error ("args to be formatted is not '...'");
+		error ("args to be formatted is not %<...%>");
 	      *no_add_attrs = true;
 	      return NULL_TREE;
 	    }

@@ -114,7 +114,7 @@ cleanup_barriers (void)
 	{
 	  prev = prev_nonnote_insn (insn);
 	  if (BARRIER_P (prev))
-	    delete_barrier (insn);
+	    delete_insn (insn);
 	  else if (prev != PREV_INSN (insn))
 	    reorder_insns (insn, insn, prev);
 	}
@@ -248,6 +248,10 @@ squeeze_notes (rtx* startp, rtx* endp)
 	      || NOTE_LINE_NUMBER (insn) == NOTE_INSN_LOOP_BEG
 	      || NOTE_LINE_NUMBER (insn) == NOTE_INSN_LOOP_END))
 	{
+	  /* BLOCK_BEG or BLOCK_END notes only exist in the `final' pass.  */
+	  gcc_assert (NOTE_LINE_NUMBER (insn) != NOTE_INSN_BLOCK_BEG
+		      && NOTE_LINE_NUMBER (insn) != NOTE_INSN_BLOCK_END);
+
 	  if (insn == start)
 	    start = next;
 	  else
@@ -766,8 +770,6 @@ condjump_p (rtx insn)
 		|| (GET_CODE (XEXP (x, 1)) == PC
 		    && (GET_CODE (XEXP (x, 2)) == LABEL_REF
 			|| GET_CODE (XEXP (x, 2)) == RETURN))));
-
-  return 0;
 }
 
 /* Return nonzero if INSN is a (possibly) conditional jump inside a
@@ -1165,17 +1167,6 @@ delete_jump (rtx insn)
 
   if (set && GET_CODE (SET_DEST (set)) == PC)
     delete_computation (insn);
-}
-
-/* Verify INSN is a BARRIER and delete it.  */
-
-void
-delete_barrier (rtx insn)
-{
-  if (!BARRIER_P (insn))
-    abort ();
-
-  delete_insn (insn);
 }
 
 /* Recursively delete prior insns that compute the value (used only by INSN
@@ -1896,6 +1887,17 @@ rtx_renumbered_equal_p (rtx x, rtx y)
       /* We can't assume nonlocal labels have their following insns yet.  */
       if (LABEL_REF_NONLOCAL_P (x) || LABEL_REF_NONLOCAL_P (y))
 	return XEXP (x, 0) == XEXP (y, 0);
+
+      /* APPLE LOCAL begin ARM pic support */
+      /* ARM uses label_refs to contant pool entries in
+	 pic_add_dot_plus_eight that must not compare equal, but, they
+	 are not emitted into the function body, so, there is no
+	 next_real_insn for them.  Unfortunately, different labels
+	 both return 0, leading to a false equality.  Found on
+	 libiberty build.  */
+      if (next_real_insn (XEXP (x, 0)) == 0)
+	return 0;
+      /* APPLE LOCAL end ARM pic support */
 
       /* Two label-refs are equivalent if they point at labels
 	 in the same position in the instruction stream.  */

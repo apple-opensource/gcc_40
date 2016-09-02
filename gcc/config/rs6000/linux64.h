@@ -1,6 +1,6 @@
 /* Definitions of target machine for GNU compiler,
    for 64 bit PowerPC linux.
-   Copyright (C) 2000, 2001, 2002, 2003, 2004
+   Copyright (C) 2000, 2001, 2002, 2003, 2004, 2005
    Free Software Foundation, Inc.
 
    This file is part of GCC.
@@ -62,8 +62,11 @@ extern int dot_symbols;
 #undef  PROCESSOR_DEFAULT64
 #define PROCESSOR_DEFAULT64 PROCESSOR_POWER4
 
-#undef	TARGET_RELOCATABLE
-#define	TARGET_RELOCATABLE (!TARGET_64BIT && (target_flags & MASK_RELOCATABLE))
+/* We don't need to generate entries in .fixup, except when
+   -mrelocatable or -mrelocatable-lib is given.  */
+#undef RELOCATABLE_NEEDS_FIXUP
+#define RELOCATABLE_NEEDS_FIXUP \
+  (target_flags & target_flags_explicit & MASK_RELOCATABLE)
 
 #undef	RS6000_ABI_NAME
 #define	RS6000_ABI_NAME "linux"
@@ -162,7 +165,8 @@ extern int dot_symbols;
 #define ASM_SPEC64 "-a64"
 
 #define ASM_SPEC_COMMON "%(asm_cpu) \
-%{.s: %{mregnames} %{mno-regnames}} %{.S: %{mregnames} %{mno-regnames}} \
+"/* APPLE LOCAL mainline 2007-03-13 5040758 */" \
+%{,assembler|,assembler-with-cpp: %{mregnames} %{mno-regnames}} \
 %{v:-V} %{Qy:} %{!Qn:-Qy} %{Wa,*:%*} \
 %{mlittle} %{mlittle-endian} %{mbig} %{mbig-endian}"
 
@@ -198,6 +202,8 @@ extern int dot_symbols;
 #define	TARGET_EABI		0
 #undef	TARGET_PROTOTYPE
 #define	TARGET_PROTOTYPE	0
+#undef RELOCATABLE_NEEDS_FIXUP
+#define RELOCATABLE_NEEDS_FIXUP 0
 
 #endif
 
@@ -221,9 +227,6 @@ extern int dot_symbols;
 #define NO_PROFILE_COUNTERS TARGET_64BIT
 #define PROFILE_HOOK(LABEL) \
   do { if (TARGET_64BIT) output_profile_hook (LABEL); } while (0)
-
-/* We don't need to generate entries in .fixup.  */
-#undef RELOCATABLE_NEEDS_FIXUP
 
 /* PowerPC64 Linux word-aligns FP doubles when -malign-power is given.  */
 #undef  ADJUST_FIELD_ALIGN
@@ -482,30 +485,34 @@ extern int dot_symbols;
 		   && GET_MODE_CLASS (GET_MODE (X)) == MODE_FLOAT	\
 		   && BITS_PER_WORD == HOST_BITS_PER_INT)))))
 
-/* This ABI cannot use DBX_LINES_FUNCTION_RELATIVE, because we must
-   use the function code label, not the function descriptor.  */
+/* This ABI cannot use DBX_LINES_FUNCTION_RELATIVE, nor can it use
+   dbxout_stab_value_internal_label_diff, because we must
+   use the function code label, not the function descriptor label.  */
 #define	DBX_OUTPUT_SOURCE_LINE(FILE, LINE, COUNTER)			\
 do									\
   {									\
     char temp[256];							\
     const char *s;							\
     ASM_GENERATE_INTERNAL_LABEL (temp, "LM", COUNTER);			\
-    fprintf (FILE, "\t.stabn 68,0,%d,", LINE);				\
+    dbxout_begin_stabn_sline (LINE);					\
     assemble_name (FILE, temp);						\
     putc ('-', FILE);							\
     s = XSTR (XEXP (DECL_RTL (current_function_decl), 0), 0);		\
     rs6000_output_function_entry (FILE, s);				\
     putc ('\n', FILE);							\
-    (*targetm.asm_out.internal_label) (FILE, "LM", COUNTER);		\
+    targetm.asm_out.internal_label (FILE, "LM", COUNTER);		\
+    COUNTER += 1;							\
   }									\
 while (0)
 
-/* Similarly, we want the function code label here.  */
-#define DBX_OUTPUT_BRAC(FILE, NAME, BRAC) \
+/* Similarly, we want the function code label here.  Cannot use
+   dbxout_stab_value_label_diff, as we have to use
+   rs6000_output_function_entry.  FIXME.  */
+#define DBX_OUTPUT_BRAC(FILE, NAME, BRAC)				\
   do									\
     {									\
       const char *s;							\
-      fprintf (FILE, "%s%d,0,0,", ASM_STABN_OP, BRAC);			\
+      dbxout_begin_stabn (BRAC);					\
       assemble_name (FILE, NAME);					\
       putc ('-', FILE);							\
       s = XSTR (XEXP (DECL_RTL (current_function_decl), 0), 0);		\
@@ -522,7 +529,7 @@ while (0)
   do									\
     {									\
       const char *s;							\
-      fprintf (FILE, "%s\"\",%d,0,0,", ASM_STABS_OP, N_FUN);		\
+      dbxout_begin_empty_stabs (N_FUN);					\
       assemble_name (FILE, LSCOPE);					\
       putc ('-', FILE);							\
       s = XSTR (XEXP (DECL_RTL (current_function_decl), 0), 0);		\
@@ -546,7 +553,7 @@ while (0)
 #undef DRAFT_V4_STRUCT_RET
 #define DRAFT_V4_STRUCT_RET (!TARGET_64BIT)
 
-#define TARGET_ASM_FILE_END file_end_indicate_exec_stack
+#define TARGET_ASM_FILE_END rs6000_elf_end_indicate_exec_stack
 
 #define TARGET_HAS_F_SETLKW
 

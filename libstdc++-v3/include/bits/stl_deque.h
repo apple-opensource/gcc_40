@@ -1,6 +1,6 @@
 // Deque implementation -*- C++ -*-
 
-// Copyright (C) 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
+// Copyright (C) 2001, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -106,14 +106,14 @@ namespace _GLIBCXX_STD
       static size_t _S_buffer_size()
       { return __deque_buf_size(sizeof(_Tp)); }
 
-      typedef random_access_iterator_tag iterator_category;
-      typedef _Tp                        value_type;
-      typedef _Ptr                       pointer;
-      typedef _Ref                       reference;
-      typedef size_t                     size_type;
-      typedef ptrdiff_t                  difference_type;
-      typedef _Tp**                      _Map_pointer;
-      typedef _Deque_iterator            _Self;
+      typedef std::random_access_iterator_tag iterator_category;
+      typedef _Tp                             value_type;
+      typedef _Ptr                            pointer;
+      typedef _Ref                            reference;
+      typedef size_t                          size_type;
+      typedef ptrdiff_t                       difference_type;
+      typedef _Tp**                           _Map_pointer;
+      typedef _Deque_iterator                 _Self;
 
       _Tp* _M_cur;
       _Tp* _M_first;
@@ -591,7 +591,7 @@ namespace _GLIBCXX_STD
    *  and we can use other standard algorithms as well.
    *  @endif
   */
-  template<typename _Tp, typename _Alloc = allocator<_Tp> >
+  template<typename _Tp, typename _Alloc = std::allocator<_Tp> >
     class deque : protected _Deque_base<_Tp, _Alloc>
     {
       // concept requirements
@@ -702,7 +702,7 @@ namespace _GLIBCXX_STD
 	: _Base(__a)
         {
 	  // Check whether it's an integral type.  If so, it's not an iterator.
-	  typedef typename _Is_integer<_InputIterator>::_Integral _Integral;
+	  typedef typename std::__is_integer<_InputIterator>::__type _Integral;
 	  _M_initialize_dispatch(__first, __last, _Integral());
 	}
 
@@ -755,7 +755,7 @@ namespace _GLIBCXX_STD
         void
         assign(_InputIterator __first, _InputIterator __last)
         {
-	  typedef typename _Is_integer<_InputIterator>::_Integral _Integral;
+	  typedef typename std::__is_integer<_InputIterator>::__type _Integral;
 	  _M_assign_dispatch(__first, __last, _Integral());
 	}
 
@@ -970,7 +970,7 @@ namespace _GLIBCXX_STD
        */
       reference
       front()
-      { return *this->_M_impl._M_start; }
+      { return *begin(); }
 
       /**
        *  Returns a read-only (constant) reference to the data at the first
@@ -978,7 +978,7 @@ namespace _GLIBCXX_STD
        */
       const_reference
       front() const
-      { return *this->_M_impl._M_start; }
+      { return *begin(); }
 
       /**
        *  Returns a read/write reference to the data at the last element of the
@@ -987,7 +987,7 @@ namespace _GLIBCXX_STD
       reference
       back()
       {
-	iterator __tmp = this->_M_impl._M_finish;
+	iterator __tmp = end();
 	--__tmp;
 	return *__tmp;
       }
@@ -999,7 +999,7 @@ namespace _GLIBCXX_STD
       const_reference
       back() const
       {
-	const_iterator __tmp = this->_M_impl._M_finish;
+	const_iterator __tmp = end();
 	--__tmp;
 	return *__tmp;
       }
@@ -1131,7 +1131,7 @@ namespace _GLIBCXX_STD
 	       _InputIterator __last)
         {
 	  // Check whether it's an integral type.  If so, it's not an iterator.
-	  typedef typename _Is_integer<_InputIterator>::_Integral _Integral;
+	  typedef typename std::__is_integer<_InputIterator>::__type _Integral;
 	  _M_insert_dispatch(__position, __first, __last, _Integral());
 	}
 
@@ -1214,8 +1214,8 @@ namespace _GLIBCXX_STD
         _M_initialize_dispatch(_InputIterator __first, _InputIterator __last,
 			       __false_type)
         {
-	  typedef typename iterator_traits<_InputIterator>::iterator_category
-	    _IterCategory;
+	  typedef typename std::iterator_traits<_InputIterator>::
+	    iterator_category _IterCategory;
 	  _M_range_initialize(__first, __last, _IterCategory());
 	}
 
@@ -1236,13 +1236,13 @@ namespace _GLIBCXX_STD
       template<typename _InputIterator>
         void
         _M_range_initialize(_InputIterator __first, _InputIterator __last,
-			    input_iterator_tag);
+			    std::input_iterator_tag);
 
       // called by the second initialize_dispatch above
       template<typename _ForwardIterator>
         void
         _M_range_initialize(_ForwardIterator __first, _ForwardIterator __last,
-			    forward_iterator_tag);
+			    std::forward_iterator_tag);
       //@}
 
       /**
@@ -1278,8 +1278,8 @@ namespace _GLIBCXX_STD
         _M_assign_dispatch(_InputIterator __first, _InputIterator __last,
 			   __false_type)
         {
-	  typedef typename iterator_traits<_InputIterator>::iterator_category
-	    _IterCategory;
+	  typedef typename std::iterator_traits<_InputIterator>::
+	    iterator_category _IterCategory;
 	  _M_assign_aux(__first, __last, _IterCategory());
 	}
 
@@ -1287,13 +1287,13 @@ namespace _GLIBCXX_STD
       template<typename _InputIterator>
         void
         _M_assign_aux(_InputIterator __first, _InputIterator __last,
-		      input_iterator_tag);
+		      std::input_iterator_tag);
 
       // called by the second assign_dispatch above
       template<typename _ForwardIterator>
         void
         _M_assign_aux(_ForwardIterator __first, _ForwardIterator __last,
-		      forward_iterator_tag)
+		      std::forward_iterator_tag)
         {
 	  const size_type __len = std::distance(__first, __last);
 	  if (__len > size())
@@ -1356,8 +1356,8 @@ namespace _GLIBCXX_STD
 			   _InputIterator __first, _InputIterator __last,
 			   __false_type)
         {
-	  typedef typename iterator_traits<_InputIterator>::iterator_category
-	    _IterCategory;
+	  typedef typename std::iterator_traits<_InputIterator>::
+	    iterator_category _IterCategory;
           _M_range_insert_aux(__pos, __first, __last, _IterCategory());
 	}
 
@@ -1365,13 +1365,13 @@ namespace _GLIBCXX_STD
       template<typename _InputIterator>
         void
         _M_range_insert_aux(iterator __pos, _InputIterator __first,
-			    _InputIterator __last, input_iterator_tag);
+			    _InputIterator __last, std::input_iterator_tag);
 
       // called by the second insert_dispatch above
       template<typename _ForwardIterator>
         void
         _M_range_insert_aux(iterator __pos, _ForwardIterator __first,
-			    _ForwardIterator __last, forward_iterator_tag);
+			    _ForwardIterator __last, std::forward_iterator_tag);
 
       // Called by insert(p,n,x), and the range insert when it turns out to be
       // the same thing.  Can use fill functions in optimal situations,

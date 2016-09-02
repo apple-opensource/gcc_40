@@ -1,5 +1,5 @@
 /* Sets (bit vectors) of hard registers, and operations on them.
-   Copyright (C) 1987, 1992, 1994, 2000, 2003, 2004
+   Copyright (C) 1987, 1992, 1994, 2000, 2003, 2004, 2005
    Free Software Foundation, Inc.
 
 This file is part of GCC
@@ -456,6 +456,18 @@ extern int reg_alloc_order[FIRST_PSEUDO_REGISTER];
 extern int inv_reg_alloc_order[FIRST_PSEUDO_REGISTER];
 #endif
 
+/* APPLE LOCAL begin ARM add DIMODE_REG_ALLOC_ORDER */
+#ifdef DIMODE_REG_ALLOC_ORDER
+/* Table of register numbers in the order in which to try to use them.  */
+
+extern int dimode_reg_alloc_order[FIRST_PSEUDO_REGISTER];
+
+/* The inverse of dimode_reg_alloc_order.  */
+
+extern int dimode_inv_reg_alloc_order[FIRST_PSEUDO_REGISTER];
+#endif
+/* APPLE LOCAL end ARM add DIMODE_REG_ALLOC_ORDER */
+
 /* For each reg class, a HARD_REG_SET saying which registers are in it.  */
 
 extern HARD_REG_SET reg_class_contents[N_REG_CLASSES];
@@ -489,6 +501,10 @@ extern int n_non_fixed_regs;
 /* Vector indexed by hardware reg giving its name.  */
 
 extern const char * reg_names[FIRST_PSEUDO_REGISTER];
+
+/* Vector indexed by reg class giving its name.  */
+
+extern const char * reg_class_names[];
 
 /* Given a hard REGN a FROM mode and a TO mode, return nonzero if
    REGN cannot change modes between the specified modes.  */

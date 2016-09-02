@@ -1,8 +1,9 @@
-/* APPLE LOCAL file Objective-C */
+/* APPLE LOCAL file mainline */
 /* Ensure there are no bizarre difficulties with accessing the 'isa' field of objects.  */
 /* { dg-do compile } */
 
-#include <objc/Object.h>
+/* APPLE LOCAL radar 4894756 */
+#include "../objc/execute/Object2.h"
 
 @interface Object (Test)
 - (Class) test1: (id)object;

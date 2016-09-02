@@ -18,13 +18,13 @@ include $(CoreOSMakefiles)/Standard/Standard.make
 # Enable Apple extensions to (gnu)make.
 USE_APPLE_PB_SUPPORT = all
 
-HOSTS = ppc i386 # `arch`
-targets = echo $${TARGETS:-'ppc i386'}
+RC_ARCHS := ppc i386
+HOSTS = $(RC_ARCHS)
+targets = echo $(RC_ARCHS)
 TARGETS := $(shell $(targets))
 
-RC_ARCHS = $(HOSTS)
-
 SRCROOT = .
+OPENSRCROOT = $(SRCROOT)
 
 SRC = `cd $(SRCROOT) && pwd | sed s,/private,,`
 OBJROOT = $(SRC)/obj
@@ -39,6 +39,11 @@ install: $(OBJROOT) $(SYMROOT) $(DSTROOT)
 	cd $(OBJROOT) && \
 	  $(SRC)/build_gcc "$(RC_ARCHS)" "$(TARGETS)" \
 	    $(SRC) $(PREFIX) $(DSTROOT) $(SYMROOT)
+
+install_libgcc: $(OBJROOT) $(DSTROOT)
+	cd $(OBJROOT) && \
+	  $(SRC)/build_libgcc "$(RC_ARCHS)" "$(TARGETS)" \
+	    $(SRC) $(PREFIX) $(DSTROOT)
 
 # installhdrs does nothing, because the headers aren't useful until
 # the compiler is installed.
@@ -60,6 +65,16 @@ installsrc:
 	                        -type f -a -name .DS_Store -o \
 				-name \*~ -o -name .\#\* \) \
 	  -exec rm -rf {} \;
+
+installopensource: $(OPENSRCROOT)
+	if [ $(OPENSRCROOT) != . ]; then \
+	  $(PAX) -rw . $(OPENSRCROOT); \
+	fi
+	find -d "$(OPENSRCROOT)" \( -type d -a -name CVS -o \
+				    -type f -a -name .DS_Store -o \
+				    -name \*~ -o -name .\#\* \) \
+	  -exec rm -rf {} \;
+	rm -rf $(OPENSRCROOT)/gcc/config/arm
 
 #######################################################################
 
@@ -84,7 +99,7 @@ clean:
 
 #######################################################################
 
-$(OBJROOT) $(SYMROOT) $(DSTROOT):
+$(OBJROOT) $(SYMROOT) $(DSTROOT) $(OPENSRCROOT):
 	mkdir -p $@
 
 .PHONY: install installsrc clean

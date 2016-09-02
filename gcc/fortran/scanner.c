@@ -1,5 +1,6 @@
 /* Character scanner.
-   Copyright (C) 2000, 2001, 2002, 2003 Free Software Foundation, Inc.
+   Copyright (C) 2000, 2001, 2002, 2003, 2004, 2005
+   Free Software Foundation, Inc.
    Contributed by Andy Vaught
 
 This file is part of GCC.
@@ -42,11 +43,7 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
    new characters and do a lot of jumping backwards.  */
 
 #include "config.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <strings.h>
-
+#include "system.h"
 #include "gfortran.h"
 
 /* Structure for holding module and include file search path.  */
@@ -360,7 +357,7 @@ skip_free_comments (void)
 
 /* Skip comment lines in fixed source mode.  We have the same rules as
    in skip_free_comment(), except that we can have a 'c', 'C' or '*'
-   in column 1. and a '!' cannot be in* column 6.  */
+   in column 1, and a '!' cannot be in column 6.  */
 
 static void
 skip_fixed_comments (void)
@@ -461,6 +458,9 @@ restart:
 	    }
 	  while (c != '\n');
 
+	  /* Avoid truncation warnings for comment ending lines.  */
+	  gfc_current_locus.lb->truncated = 0;
+
 	  goto done;
 	}
 
@@ -468,7 +468,7 @@ restart:
 	goto done;
 
       /* If the next nonblank character is a ! or \n, we've got a
-         continuation line. */
+         continuation line.  */
       old_loc = gfc_current_locus;
 
       c = next_char ();
@@ -528,6 +528,9 @@ restart:
 	      c = next_char ();
 	    }
 	  while (c != '\n');
+
+	  /* Avoid truncation warnings for comment ending lines.  */
+	  gfc_current_locus.lb->truncated = 0;
 	}
 
       if (c != '\n')
@@ -634,21 +637,17 @@ gfc_error_recovery (void)
 	  if (c == delim)
 	    break;
 	  if (c == '\n')
-	    goto done;
+	    return;
 	  if (c == '\\')
 	    {
 	      c = next_char ();
 	      if (c == '\n')
-		goto done;
+		return;
 	    }
 	}
       if (gfc_at_eof ())
 	break;
     }
-
-done:
-  if (c == '\n')
-    gfc_advance_line ();
 }
 
 
@@ -680,12 +679,14 @@ gfc_gobble_whitespace (void)
    need be.
    In fixed mode, we expand a tab that occurs within the statement
    label region to expand to spaces that leave the next character in
-   the source region.  */
+   the source region.
+   load_line returns wether the line was truncated.  */
 
-static void
-load_line (FILE * input, char **pbuf, char *filename, int linenum)
+static int
+load_line (FILE * input, char **pbuf)
 {
-  int c, maxlen, i, trunc_flag, preprocessor_flag;
+  int c, maxlen, i, preprocessor_flag;
+  int trunc_flag = 0;
   static int buflen = 0;
   char *buffer;
 
@@ -763,22 +764,13 @@ load_line (FILE * input, char **pbuf, char *filename, int linenum)
       else if (i >= buflen)
 	{			
 	  /* Truncate the rest of the line.  */
-	  trunc_flag = 1;
-
 	  for (;;)
 	    {
 	      c = fgetc (input);
 	      if (c == '\n' || c == EOF)
 		break;
 
-	      if (gfc_option.warn_line_truncation
-		  && trunc_flag
-		  && !gfc_is_whitespace (c))
-		{
-		  gfc_warning_now ("%s:%d: Line is being truncated",
-				   filename, linenum);
-		  trunc_flag = 0;
-		}
+	      trunc_flag = 1;
 	    }
 
 	  ungetc ('\n', input);
@@ -794,6 +786,8 @@ load_line (FILE * input, char **pbuf, char *filename, int linenum)
       *buffer++ = ' ';
 
   *buffer = '\0';
+
+  return trunc_flag;
 }
 
 
@@ -981,7 +975,7 @@ include_line (char *line)
   if (*c != '\0' && *c != '!')
     return false;
 
-  /* We have an include line at this point. */
+  /* We have an include line at this point.  */
 
   *stop = '\0'; /* It's ok to trash the buffer, as this line won't be
 		   read by anything else.  */
@@ -1037,7 +1031,7 @@ load_file (char *filename, bool initial)
 
   for (;;) 
     {
-      load_line (input, &line, filename, current_file->line);
+      int trunc = load_line (input, &line);
 
       len = strlen (line);
       if (feof (input) && len == 0)
@@ -1069,6 +1063,7 @@ load_file (char *filename, bool initial)
       b->linenum = current_file->line++;
 #endif
       b->file = current_file;
+      b->truncated = trunc;
       strcpy (b->line, line);
 
       if (line_head == NULL)
@@ -1093,7 +1088,7 @@ load_file (char *filename, bool initial)
 
 
 /* Determine the source form from the filename extension.  We assume
-   case insensitivity. */
+   case insensitivity.  */
 
 static gfc_source_form
 form_from_filename (const char *filename)

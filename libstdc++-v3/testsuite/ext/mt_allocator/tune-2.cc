@@ -1,6 +1,6 @@
 // 2004-08-25 Benjamin Kosnik <bkoz@redhat.com>
 //
-// Copyright (C) 2004 Free Software Foundation, Inc.
+// Copyright (C) 2004, 2005 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -18,9 +18,10 @@
 // Software Foundation, 59 Temple Place - Suite 330, Boston, MA 02111-1307,
 // USA.
 
-#include <testsuite_hooks.h>
 #include <memory>
 #include <ext/mt_allocator.h>
+#include <testsuite_hooks.h>
+#include <testsuite_character.h>
 
 // Tune characteristics. 
 // __per_type_pool_policy
@@ -29,10 +30,14 @@ void test02()
   bool test __attribute__((unused)) = true;
 
   typedef __gnu_test::pod_int value_type;
+
+  using __gnu_cxx::__pool;
+  using __gnu_cxx::__per_type_pool_policy;
+
 #ifdef __GTHREADS
-  typedef __gnu_cxx::__per_type_pool_policy<value_type, true> policy_type;
+  typedef __per_type_pool_policy<value_type, __pool, true> policy_type;
 #else
-  typedef __gnu_cxx::__per_type_pool_policy<value_type, false> policy_type;
+  typedef __per_type_pool_policy<value_type, __pool, false> policy_type;
 #endif
   typedef __gnu_cxx::__mt_alloc<value_type, policy_type> allocator_type;
   typedef __gnu_cxx::__pool_base::_Tune tune_type;

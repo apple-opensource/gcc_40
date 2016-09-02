@@ -1,6 +1,6 @@
 /* Allocate registers for pseudo-registers that span basic blocks.
    Copyright (C) 1987, 1988, 1991, 1994, 1996, 1997, 1998,
-   1999, 2000, 2002, 2003, 2004 Free Software Foundation, Inc.
+   1999, 2000, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -24,13 +24,11 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
-
 #include "machmode.h"
 #include "hard-reg-set.h"
 #include "rtl.h"
 #include "tm_p.h"
 #include "flags.h"
-#include "basic-block.h"
 #include "regs.h"
 #include "function.h"
 #include "insn-config.h"
@@ -46,6 +44,11 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
 #define REWRITE_WEIGHT_COMPUTATION
 #endif
 /* APPLE LOCAL end rewrite weight computation */
+/* APPLE LOCAL begin ARM pseudo-pseudo tying */
+#ifndef TIE_PSEUDOS
+#define TIE_PSEUDOS 0
+#endif
+/* APPLE LOCAL end ARM pseudo-pseudo tying */
 
 /* This pass of the compiler performs global register allocation.
    It assigns hard register numbers to all the pseudo registers
@@ -86,6 +89,10 @@ Software Foundation, 59 Temple Place - Suite 330, Boston, MA
    5. Allocate the variables in that order; each if possible into
    a preferred register, else into another register.  */
 
+/* APPLE LOCAL begin CW asm blocks */
+extern int flag_iasm_blocks;
+/* APPLE LOCAL end CW asm blocks */
+
 /* Number of pseudo-registers which are candidates for allocation.  */
 
 static int max_allocno;
@@ -176,6 +183,17 @@ static int *reg_may_share;
 
 static INT_TYPE *conflicts;
 
+/* APPLE LOCAL begin 4321079 */
+/* max_allocno by max_allocno array of bits,
+   recording whether two allocno's can usefully be tied (we think we
+   will benefit by having both in the same hardware register).
+   This handles the pseudo-pseudo case of preferences.
+
+   `pseudo_preferences' is symmetric after the call to mirror_conflicts.  */
+
+static INT_TYPE *pseudo_preferences;
+/* APPLE LOCAL end 4321079 */
+
 /* Number of ints require to hold max_allocno bits.
    This is the length of a row in `conflicts'.  */
 
@@ -208,6 +226,56 @@ do {									\
     }									\
 } while (0)
 
+/* APPLE LOCAL begin 4321079 */
+/* Test, set and clear macros for `pseudo_preferences'.
+   These evaluate their arguments more than once. */
+
+#define TEST_PSEUDO_PREF(I, J) \
+ (pseudo_preferences[(I) * allocno_row_words + (unsigned) (J) / INT_BITS] \
+  & ((INT_TYPE) 1 << ((unsigned) (J) % INT_BITS)))
+
+#define SET_PSEUDO_PREF(I, J) \
+ (pseudo_preferences[(I) * allocno_row_words + (unsigned) (J) / INT_BITS] \
+  |= ((INT_TYPE) 1 << ((unsigned) (J) % INT_BITS)))
+
+#define CLEAR_PSEUDO_PREF(I, J) \
+ (pseudo_preferences[(I) * allocno_row_words + (unsigned) (J) / INT_BITS] \
+  &= ~((INT_TYPE) 1 << ((unsigned) (J) % INT_BITS)))
+/* APPLE LOCAL end 4321079 */
+
+/* APPLE LOCAL begin 4253848 */
+
+#define ALLOCNO_SET_INITIALIZE(DST)				\
+  (DST = xcalloc (max_allocno * allocno_row_words, sizeof (INT_TYPE)))
+
+#define CLEAR_ALLOCNO_BIT(SET, BIT)				\
+ (SET[((unsigned)(BIT) / INT_BITS) * allocno_row_words]		\
+  &= ~((INT_TYPE) 1 << ((unsigned) (BIT) % INT_BITS)))
+
+#define FOR_EVERY_ALLOCNO_SET_WORD(I)				\
+  for (I = 0; (I) < allocno_row_words; I++)
+
+#define CLEAR_ALLOCNO_SET(DST)					\
+  memset (DST, 0, allocno_row_words * sizeof (INT_TYPE))
+
+#define COPY_ALLOCNO_SET(DST, SRC)				\
+  memcpy (DST, SRC, allocno_row_words * sizeof (INT_TYPE))
+
+#define GO_IF_ALLOCNO_SET_EMPTY(SET, TO)			\
+  do {								\
+    int __i;							\
+    FOR_EVERY_ALLOCNO_SET_WORD (__i)				\
+      if (*(SET + __i))						\
+        goto __not_##TO;					\
+  goto TO;							\
+   __not_##TO:;							\
+  } while (0);
+
+/* Indexing for the pseudo_preferences array.  */
+#define PSEUDO_PREFERENCES(INDEX)				\
+  (pseudo_preferences + (INDEX) * allocno_row_words)
+
+/* APPLE LOCAL end 4253848 */
 /* This doesn't work for non-GNU C due to the way CODE is macro expanded.  */
 #if 0
 /* For any allocno that conflicts with IN_ALLOCNO, set OUT_ALLOCNO to
@@ -235,6 +303,13 @@ static HARD_REG_SET regs_used_so_far;
 
 static int local_reg_n_refs[FIRST_PSEUDO_REGISTER];
 
+/* APPLE LOCAL begin ARM pseudo-pseudo tying */
+/* Set with no registers.  This is not declared const to avoid a warning at the point
+   of use; but it is const.  */
+
+static HARD_REG_SET empty_reg_set;
+/* APPLE LOCAL end ARM pseudo-pseudo tying */
+
 /* APPLE LOCAL begin rewrite weight computation */
 #ifdef REWRITE_WEIGHT_COMPUTATION
 /* Overall weight of each hard reg, as used by local alloc.
@@ -245,7 +320,7 @@ static int local_reg_n_refs[FIRST_PSEUDO_REGISTER];
    Now it is computed as
    SUM (REG_FREQ(i)/REG_LIVE_LENGTH(i)) over all uses. */
 
-static double local_reg_weight[FIRST_PSEUDO_REGISTER];
+static HOST_WIDE_INT local_reg_weight[FIRST_PSEUDO_REGISTER];
 #else
 /* Frequency of uses of given hard reg.  */
 static int local_reg_freq[FIRST_PSEUDO_REGISTER];
@@ -316,6 +391,8 @@ static int allocno_compare (const void *, const void *);
 static void global_conflicts (void);
 static void mirror_conflicts (void);
 static void expand_preferences (void);
+/* APPLE LOCAL 4253848 */
+static void pseudo_preference_transitivity (void);
 static void prune_preferences (void);
 static void find_reg (int, HARD_REG_SET, int, int, int);
 static void record_one_conflict (int);
@@ -332,14 +409,12 @@ static void reg_dies (int, enum machine_mode, struct insn_chain *);
 
 static void allocate_bb_info (void);
 static void free_bb_info (void);
-static void check_earlyclobber (rtx);
-static bool regclass_intersect (enum reg_class, enum reg_class);
+static bool check_earlyclobber (rtx);
 static void mark_reg_use_for_earlyclobber_1 (rtx *, void *);
 static int mark_reg_use_for_earlyclobber (rtx *, void *);
 static void calculate_local_reg_bb_info (void);
 static void set_up_bb_rts_numbers (void);
 static int rpost_cmp (const void *, const void *);
-static bool modify_bb_reg_pav (basic_block, basic_block, bool);
 static void calculate_reg_pav (void);
 static void modify_reg_pav (void);
 static void make_accurate_live_analysis (void);
@@ -384,7 +459,17 @@ global_alloc (FILE *file)
     {
       bool cannot_elim
 	= (! CAN_ELIMINATE (eliminables[i].from, eliminables[i].to)
+/* APPLE LOCAL begin ARM prefer SP to FP */
+#ifdef TARGET_ARM
+	   /* There are certain performance benefits for the ARM target
+	      in using SP instead of FP.  CAN_ELIMINATE will prevent us
+	      from using SP when we can't, so there's no need for us to
+	      prevent elimination to the SP.  */
+	   );
+#else
 	   || (eliminables[i].to == STACK_POINTER_REGNUM && need_fp));
+#endif
+/* APPLE LOCAL end ARM prefer SP to FP */
 
       if (!regs_asm_clobbered[eliminables[i].from])
 	{
@@ -407,8 +492,13 @@ global_alloc (FILE *file)
 	SET_HARD_REG_BIT (no_global_alloc_regs, HARD_FRAME_POINTER_REGNUM);
     }
   else if (need_fp)
+    /* APPLE LOCAL begin CW asm blocks 4443946 */
+    {
+      if (!flag_iasm_blocks)
     error ("%s cannot be used in asm here",
 	   reg_names[HARD_FRAME_POINTER_REGNUM]);
+    }
+    /* APPLE LOCAL end CW asm blocks 4443946 */
   else
     regs_ever_live[HARD_FRAME_POINTER_REGNUM] = 1;
 #endif
@@ -543,8 +633,8 @@ global_alloc (FILE *file)
 	    /* APPLE LOCAL begin rewrite weight computation */
 #ifdef REWRITE_WEIGHT_COMPUTATION
 	    if ( REG_LIVE_LENGTH (i) > 0 )
-	      local_reg_weight[j] += (double)REG_FREQ (i) 
-				    / (double) REG_LIVE_LENGTH (i);
+	      local_reg_weight[j] += (REG_FREQ (i) * 100)
+				      / REG_LIVE_LENGTH (i);
 #else
 	    local_reg_freq[j] += REG_FREQ (i);
 	    local_reg_live_length[j] += REG_LIVE_LENGTH (i);
@@ -570,6 +660,11 @@ global_alloc (FILE *file)
      allocate would occasionally cause it to exceed the stack limit and
      cause unpredictable core dumps.  Some examples were > 2Mb in size.  */
   conflicts = xcalloc (max_allocno * allocno_row_words, sizeof (INT_TYPE));
+
+  /* APPLE LOCAL begin 4321079 */
+  pseudo_preferences = 
+	xcalloc (max_allocno * allocno_row_words, sizeof (INT_TYPE));
+  /* APPLE LOCAL end 4321079 */
 
   allocnos_live = xmalloc (allocno_row_words * sizeof (INT_TYPE));
 
@@ -605,6 +700,11 @@ global_alloc (FILE *file)
       /* Try to expand the preferences by merging them between allocnos.  */
 
       expand_preferences ();
+
+      /* APPLE LOCAL begin 4253848 */
+      if (!flag_schedule_insns)
+	pseudo_preference_transitivity ();
+      /* APPLE LOCAL end 4253848 */
 
       /* Determine the order to allocate the remaining pseudo registers.  */
 
@@ -674,6 +774,8 @@ global_alloc (FILE *file)
   free (reg_may_share);
   free (allocno);
   free (conflicts);
+  /* APPLE LOCAL 4321079 */
+  free (pseudo_preferences);
   free (allocnos_live);
 
   return retval;
@@ -713,7 +815,7 @@ allocno_compare (const void *v1p, const void *v2p)
 static void
 global_conflicts (void)
 {
-  int i;
+  unsigned i;
   basic_block b;
   rtx insn;
   int *block_start_allocnos;
@@ -739,7 +841,7 @@ global_conflicts (void)
 	 since one hard reg can be used with various sizes.
 	 Therefore, we must require that all the hard regs
 	 implicitly live as part of a multi-word hard reg
-	 are explicitly marked in basic_block_live_at_start.  */
+	 be explicitly marked in basic_block_live_at_start.  */
 
       {
 	regset old = b->global_live_at_start;
@@ -949,34 +1051,267 @@ expand_preferences (void)
 	&& (set = single_set (insn)) != 0
 	&& REG_P (SET_DEST (set))
 	&& reg_allocno[REGNO (SET_DEST (set))] >= 0)
-      for (link = REG_NOTES (insn); link; link = XEXP (link, 1))
-	if (REG_NOTE_KIND (link) == REG_DEAD
-	    && REG_P (XEXP (link, 0))
-	    && reg_allocno[REGNO (XEXP (link, 0))] >= 0
-	    && ! CONFLICTP (reg_allocno[REGNO (SET_DEST (set))],
-			    reg_allocno[REGNO (XEXP (link, 0))]))
+      /* APPLE LOCAL begin 4253848 */
+      {
+	unsigned int deaths = 0;
+	int commutative = 0;
+	int zero_constraint = 0;
+	int zero_allocno = 0;
+	int zero_commutative_allocno = 0;
+	int i;
+
+	/* Count the pseudo-registers that died at this insn.  */
+	for (link = REG_NOTES (insn); link; link = XEXP (link, 1))
+	  if (REG_NOTE_KIND (link) == REG_DEAD)
+	    deaths++;
+
+	extract_insn (insn);
+
+	/* Look for "0" constraints.  */
+	for (i = 1; i < recog_data.n_operands; i++)
 	  {
-	    int a1 = reg_allocno[REGNO (SET_DEST (set))];
-	    int a2 = reg_allocno[REGNO (XEXP (link, 0))];
-
-	    if (XEXP (link, 0) == SET_SRC (set))
+	    const char *constraint = recog_data.constraints[i];
+	    /* Look for "0" or "%0" or "0%" constraint.  */
+	    if (*constraint == '%')	/* Look for "%0".  */
 	      {
-		IOR_HARD_REG_SET (allocno[a1].hard_reg_copy_preferences,
-				  allocno[a2].hard_reg_copy_preferences);
-		IOR_HARD_REG_SET (allocno[a2].hard_reg_copy_preferences,
-				  allocno[a1].hard_reg_copy_preferences);
+		commutative = i;
+		constraint++;
 	      }
-
-	    IOR_HARD_REG_SET (allocno[a1].hard_reg_preferences,
-			      allocno[a2].hard_reg_preferences);
-	    IOR_HARD_REG_SET (allocno[a2].hard_reg_preferences,
-			      allocno[a1].hard_reg_preferences);
-	    IOR_HARD_REG_SET (allocno[a1].hard_reg_full_preferences,
-			      allocno[a2].hard_reg_full_preferences);
-	    IOR_HARD_REG_SET (allocno[a2].hard_reg_full_preferences,
-			      allocno[a1].hard_reg_full_preferences);
+	    if (*constraint == '0')
+	      {
+		zero_constraint = i;
+		constraint++;
+	      }
+	    if (*constraint == '%')	/* Accept "0%".  */
+	      commutative = i;
 	  }
+
+	if (zero_constraint)
+	  {
+	    rtx reg_rtx = recog_data.operand[zero_constraint];
+	    if (GET_CODE (reg_rtx) == SUBREG)
+	      reg_rtx = SUBREG_REG (reg_rtx);
+	    if (REG_P (reg_rtx))
+	      zero_allocno = reg_allocno[REGNO (reg_rtx)];
+	    if (commutative)
+	      {
+		rtx reg2_rtx = recog_data.operand[zero_constraint+1];
+		if (GET_CODE (reg2_rtx) == SUBREG)
+		  reg2_rtx = SUBREG_REG (reg2_rtx);
+		if (REG_P (reg2_rtx))
+		  zero_commutative_allocno = reg_allocno[REGNO (reg2_rtx)];
+	      }
+	  }
+
+	/* For every pseudo-register that dies at this insn:  */
+	for (link = REG_NOTES (insn); link; link = XEXP (link, 1))
+	  if (REG_NOTE_KIND (link) == REG_DEAD
+	      && REG_P (XEXP (link, 0))
+	      && reg_allocno[REGNO (XEXP (link, 0))] >= 0
+	      && ! CONFLICTP (reg_allocno[REGNO (SET_DEST (set))],
+			      reg_allocno[REGNO (XEXP (link, 0))]))
+	    {
+	      /* APPLE LOCAL begin 4271691 */
+	      /* APPLE LOCAL 4321079 */
+	      int dest_allocno = reg_allocno[REGNO (SET_DEST (set))];
+	      int dead_allocno = reg_allocno[REGNO (XEXP (link, 0))];
+	      bool hard_reg_copy_preferences_set = FALSE;
+	      rtx set_src = SET_SRC (set);
+	      if (GET_CODE (set_src) == SUBREG)
+		  {
+		    rtx reg = SUBREG_REG (set_src);
+		    if (SUBREG_BYTE (set_src) == 0
+			&& (GET_MODE_SIZE (GET_MODE (set_src))
+			    == GET_MODE_SIZE (GET_MODE (reg))))
+		      set_src = reg;
+		  }
+
+	      /* If the source is a REG, this is a reg-reg move;
+		 record the affinity between these.  */
+	      if (XEXP (link, 0) == set_src)
+		{
+		  IOR_HARD_REG_SET (allocno[dest_allocno].hard_reg_copy_preferences,
+				    allocno[dead_allocno].hard_reg_copy_preferences);
+		  IOR_HARD_REG_SET (allocno[dead_allocno].hard_reg_copy_preferences,
+				    allocno[dest_allocno].hard_reg_copy_preferences);
+		  hard_reg_copy_preferences_set = TRUE;
+		}
+	      /* APPLE LOCAL begin 4385068 */
+	      /* We can establish a new pseudo preference as well; this tends
+		 to cut down on the number of reg-reg copies.  Since two
+		 inputs that both die conflict with each other, we shouldn't
+		 tie both.  Experimentally, neither picking the first nor the second
+		 seems to be a winner, so we tie neither. 
+		 On ppc, this whole idea seems to be a loser; introducing extra
+		 dependencies for scheduling loses more than eliminating reg-reg
+		 copies gains.  We make some attempt to abstract this by looking
+		 at flag_schedule_insns; if this is off, we conclude good scheduling
+		 is relatively unimportant.
+		 The limitation to vectors is not necessary for correctness. */
+	      if (!flag_schedule_insns
+		  && VECTOR_MODE_P (GET_MODE (SET_DEST (set)))
+		  && VECTOR_MODE_P (GET_MODE (XEXP (link, 0))))
+		{
+		  /* We want to discover pseudo-registers that die
+		     in this insn, and prefer one of them for our
+		     destination register.  This is especially
+		     useful for two-address targets like the x86.
+		   
+		     If some input operand has a "0" constraint, that
+		     means it /must/ be the destination register too.
+		     If the constraint is "%0", then the operation is
+		     commutative (e.g. ADD), and the pattern will
+		     still work if the next source operand is
+		     identical to the destination.  Anyway, if this
+		     input operand dies at this insn, it's an ideal
+		     candidate for the destination pseudo-register.
+		     If the "0" input operand does not die at this
+		     insn, pretend there is no "0" constraint, and
+		     fall through to the no-"0"-constraint case:
+		   
+		     If no operand has a "0" constraint, then any
+		     pseudo-register that dies in this insn could be
+		     used for the destination.  If exactly one
+		     pseudo-register dies at this insn, it's probably
+		     a good candidate for the destination register
+		     too.  Previous experience (see comment above)
+		     suggests this is not worthwhile if multiple
+		     pseudo-registers die at this insn.
+		  */
+		  if ((deaths == 1 && !zero_allocno)
+		      || dead_allocno == zero_allocno
+		      || dead_allocno == zero_commutative_allocno
+		      || hard_reg_copy_preferences_set)
+		    {
+		      SET_PSEUDO_PREF (dest_allocno, dead_allocno);
+		      SET_PSEUDO_PREF (dead_allocno, dest_allocno);
+		      break;	/* Break out of the for-every-NOTE_REG_DEAD loop.  */
+		    }
+		  /* APPLE LOCAL end 4271691 */
+		}
+	      /* APPLE LOCAL end 4385068 */
+
+	      IOR_HARD_REG_SET (allocno[dest_allocno].hard_reg_preferences,
+				allocno[dead_allocno].hard_reg_preferences);
+	      IOR_HARD_REG_SET (allocno[dead_allocno].hard_reg_preferences,
+				allocno[dest_allocno].hard_reg_preferences);
+	      IOR_HARD_REG_SET (allocno[dest_allocno].hard_reg_full_preferences,
+				allocno[dead_allocno].hard_reg_full_preferences);
+	      IOR_HARD_REG_SET (allocno[dead_allocno].hard_reg_full_preferences,
+				allocno[dest_allocno].hard_reg_full_preferences);
+	    }
+      }
 }
+/* APPLE LOCAL end 4253848 */
+
+/* APPLE LOCAL begin 4253848 */
+/* If pseudoA has a preference for pseudoB, and pseudoB has such a
+   preference for pseudoC, then arrange for all of these to have
+   preferences for each other.  This is arguably wrong, as the
+   pseudo_preference relation is not transitive; it's possible that
+   pseudoA conflicts with pseudoC while both have a preference for
+   pseudoB.  However, this seems harmless, as expand_preferences()
+   will check for these conflicts before acting on any of these
+   preferences.
+*/
+static void
+pseudo_preference_transitivity (void)
+{
+  /*
+    done = <empty>
+    for j = all allocno[]s
+    if done[j], continue
+    done[j] = true;
+    group_pref = this_pref_set = pseudo_preferences[j];
+    while (this_pref_set non-empty)
+    next_pref_set = <empty>
+    for k = each pref in this_pref_set
+    next_pref_set |= (~group_pref & pseudo_preferences[k])
+    done[k] = true;
+    this_pref_set = next_pref_set
+    for k = every psuedo in group_pref_set
+    pseudo_preferences[k] = group_pref_set
+  */
+  INT_TYPE *group_pref_set, *this_pref_set,
+    *next_pref_set, *tmp_pref_set, *allocno_empty_set;
+  int i, j, k;
+  bool *done = xcalloc (max_allocno, sizeof (bool));
+  INT_TYPE tmp_set;
+
+  ALLOCNO_SET_INITIALIZE (group_pref_set);
+  ALLOCNO_SET_INITIALIZE (this_pref_set);
+  ALLOCNO_SET_INITIALIZE (next_pref_set);
+  ALLOCNO_SET_INITIALIZE (tmp_pref_set);
+  ALLOCNO_SET_INITIALIZE (allocno_empty_set);
+
+  /* In spite of the triple-nesting, this loop-nest is not O(n**3);
+     the "done[]" array insures we visit each allocno exactly once.
+     In other words, this should be O(n), or close to it.  */
+  for (j=0; j < max_allocno; j++)
+    {
+      if (done[j])
+	continue;
+      done[j] = TRUE;
+      /* If this allocno has no pseudo_preferences, no work to do.  */
+      GO_IF_ALLOCNO_SET_EMPTY (PSEUDO_PREFERENCES (j), skip);
+      FOR_EVERY_ALLOCNO_SET_WORD (i)
+      {
+	tmp_set = *(PSEUDO_PREFERENCES (j) + i);
+	*(group_pref_set + i) = tmp_set;
+	*(this_pref_set + i) = tmp_set;
+      }
+      do {
+	CLEAR_ALLOCNO_SET (next_pref_set);
+	EXECUTE_IF_SET_IN_ALLOCNO_SET
+	  (this_pref_set, k,
+	   FOR_EVERY_ALLOCNO_SET_WORD (i)
+	   {
+	     /* Yield bits of any pseudos that should be part of
+		group_pref_set, but aren't.  */
+	     /* Get the set of allocnos that are NOT part of group_pref_set...  */
+	     tmp_set = ~*(group_pref_set + i);
+	     /* ...AND are preferred by this allocno... */
+	     tmp_set &= *(PSEUDO_PREFERENCES (k) + i);
+	     /* IOR these allocnos into our worklist-set for the next
+		pass.  */
+	     *(next_pref_set + i) |= tmp_set;
+	   }
+	   done[k] = TRUE;
+	   );
+	/* If we didn't find any new allocnos that should be part of
+	   this group, we're done with this group.  This is the
+	   infinite do-while-true loop exit.  */
+	GO_IF_ALLOCNO_SET_EMPTY (next_pref_set, propagate);
+	FOR_EVERY_ALLOCNO_SET_WORD (i)
+	{
+	  /* This is our set of allocnos to visit on the next pass of
+	     the infinite do-while-true loop.  */
+	  tmp_set = *(next_pref_set + i);
+	  *(this_pref_set + i) = tmp_set;
+	  /* IOR them into our master set.  */
+	  *(group_pref_set + i) |= tmp_set;
+	}
+      }while (TRUE);
+      /* Update every member of the allocno group with the transitive
+	 closure of their pseudo_preferences.  */
+    propagate:
+      EXECUTE_IF_SET_IN_ALLOCNO_SET
+	(group_pref_set, k,
+	 COPY_ALLOCNO_SET (PSEUDO_PREFERENCES (k), group_pref_set);
+	 /* Allocnos apparently aren't supposed to prefer themselves,
+	    although it's not clear this would be harmful.  */
+	 CLEAR_PSEUDO_PREF (k, k);
+	 );
+    skip: ;
+    }
+  free (done);
+  free (group_pref_set);
+  free (this_pref_set);
+  free (next_pref_set);
+  free (tmp_pref_set);
+  free (allocno_empty_set);
+}
+/* APPLE LOCAL end 4253848 */
 
 /* Prune the preferences for global registers to exclude registers that cannot
    be used.
@@ -1129,6 +1464,12 @@ find_reg (int num, HARD_REG_SET losers, int alt_regs_p, int accept_call_clobbere
 #else
 	  int regno = i;
 #endif
+/* APPLE LOCAL begin ARM add DIMODE_REG_ALLOC_ORDER */
+#ifdef DIMODE_REG_ALLOC_ORDER
+	  if (mode == DImode)
+	    regno = dimode_reg_alloc_order[i];
+#endif
+/* APPLE LOCAL end ARM add DIMODE_REG_ALLOC_ORDER */
 	  if (! TEST_HARD_REG_BIT (used, regno)
 	      && HARD_REGNO_MODE_OK (regno, mode)
 	      && (allocno[num].calls_crossed == 0
@@ -1315,11 +1656,11 @@ find_reg (int num, HARD_REG_SET losers, int alt_regs_p, int accept_call_clobbere
 	    {
 	      /* APPLE LOCAL begin rewrite weight computation */
 #ifdef REWRITE_WEIGHT_COMPUTATION
-	      /* We explicitly evaluate the divide result into a temporary
-		 variable so as to avoid excess precision problems that occur
-		 on an i386-unknown-sysv4.2 (unixware) host.  */
-	      double tmp = ((double) allocno[num].freq
-			    / allocno[num].live_length);
+	      /* The multiplier of 100 is used to help get a couple
+		 of places of difference to mitigate the problem of
+		 having to use integers in the weight calculation.  */
+	      HOST_WIDE_INT tmp = (allocno[num].freq * 100)
+				  / allocno[num].live_length;
 #else
 	    /* APPLE LOCAL end rewrite weight computation */
 	      /* We explicitly evaluate the divide results into temporary
@@ -1398,6 +1739,78 @@ find_reg (int num, HARD_REG_SET losers, int alt_regs_p, int accept_call_clobbere
 	{
 	  IOR_HARD_REG_SET (allocno[j].hard_reg_conflicts, this_reg);
 	});
+
+      /* APPLE LOCAL begin 4321079 */
+      /* APPLE LOCAL begin ARM pseudo-pseudo tying */
+      {
+	int k, l;
+	/* If this reg is not live over calls, remove any ties to pseudo-regs
+	   that are live over calls; they cannot use this reg. */
+	if (call_used_regs[best_reg])
+	  {
+	    EXECUTE_IF_SET_IN_ALLOCNO_SET (
+	      pseudo_preferences + num * allocno_row_words, k,
+	      {
+		if (allocno[k].calls_crossed != 0)
+		  {
+		    CLEAR_PSEUDO_PREF (num, k);
+		    CLEAR_PSEUDO_PREF (k, num);
+		  }
+	      });
+	  }
+
+	/* Mark tied pseudo-regs that have not yet been assigned a reg
+	   and do not already have a hard reg preference
+	   and do not conflict as preferring this reg.  Mark pseudo-regs
+	   conflicting with regs tied to this reg and not yet assigned a 
+	   reg as not preferring this reg. */
+	EXECUTE_IF_SET_IN_ALLOCNO_SET (
+	  pseudo_preferences + num * allocno_row_words, k,
+	  {
+	    if (!CONFLICTP (num, k) && reg_renumber[allocno[k].reg] < 0)
+	      {
+	       /* go-if-equal is not exactly what we want, ugh */
+		GO_IF_HARD_REG_EQUAL (allocno[k].hard_reg_copy_preferences, 
+				      empty_reg_set, none_yet);
+		goto skip;
+		none_yet:;
+		  SET_REGBIT (hard_reg_copy_preferences, k, best_reg);
+		skip:;
+	      }
+
+	    if (num != k && !CONFLICTP (num, k) && 
+		(reg_renumber[allocno[k].reg] < 0 ||
+		 reg_renumber[allocno[k].reg] == best_reg))
+	      EXECUTE_IF_SET_IN_ALLOCNO_SET (
+		conflicts + k * allocno_row_words, l,
+		{
+		  if (k != l && reg_renumber[allocno[l].reg] < 0)
+		    SET_REGBIT (regs_someone_prefers, l, best_reg);
+		});
+	  });
+	/* Mark pseudo-regs tied to {conflicting allocnos which have either
+	   not yet been assigned a reg, or assigned best_reg}, but are not
+	   tied to this allocno, and not yet assigned a reg, as not preferring
+	   this reg, provided they are not already marked as preferring
+	   this reg.  Got that?  */
+	EXECUTE_IF_SET_IN_ALLOCNO_SET (
+	  conflicts + num * allocno_row_words, k,
+	  {
+	    if (num != k 
+		&& (reg_renumber[allocno[k].reg] < 0
+		    || reg_renumber[allocno[k].reg] == best_reg))
+	      EXECUTE_IF_SET_IN_ALLOCNO_SET (
+		pseudo_preferences + k * allocno_row_words, l, 
+		{
+		  if (k != l && !CONFLICTP (k, l) && !TEST_PSEUDO_PREF (l, num)
+		      && !TEST_HARD_REG_BIT(allocno[l].hard_reg_preferences, best_reg)
+		      && reg_renumber[allocno[l].reg] < 0)
+		    SET_REGBIT (regs_someone_prefers, l, best_reg);
+		});
+	  });
+      }	    
+      /* APPLE LOCAL end ARM pseudo-pseudo tying */
+      /* APPLE LOCAL end 4321079 */
     }
 }
 
@@ -1479,15 +1892,19 @@ record_conflicts (int *allocno_vec, int len)
                       hard_regs_live);
 }
 
-/* If CONFLICTP (i, j) is true, make sure CONFLICTP (j, i) is also true.  */
+/* APPLE LOCAL begin 4321079 */
+/* If CONFLICTP (i, j) is true, make sure CONFLICTP (j, i) is also true.
+   Likewise for pseudo_preferences.  */
+
 static void
 mirror_conflicts (void)
 {
   int i, j;
   int rw = allocno_row_words;
   int rwb = rw * INT_BITS;
-  INT_TYPE *p = conflicts;
+  INT_TYPE *p = conflicts, *pp = pseudo_preferences;
   INT_TYPE *q0 = conflicts, *q1, *q2;
+  INT_TYPE *qq0 = pseudo_preferences, *qq1, *qq2;
   unsigned INT_TYPE mask;
 
   for (i = max_allocno - 1, mask = 1; i >= 0; i--, mask <<= 1)
@@ -1496,20 +1913,32 @@ mirror_conflicts (void)
 	{
 	  mask = 1;
 	  q0++;
+	  qq0++;
 	}
-      for (j = allocno_row_words - 1, q1 = q0; j >= 0; j--, q1 += rwb)
+      for (j = allocno_row_words - 1, q1 = q0, qq1 = qq0; 
+	   j >= 0; 
+	   j--, q1 += rwb, qq1 += rwb)
 	{
 	  unsigned INT_TYPE word;
 
-	  for (word = (unsigned INT_TYPE) *p++, q2 = q1; word;
+	  for (word = (unsigned INT_TYPE) *p++, q2 = q1; 
+	       word;
 	       word >>= 1, q2 += rw)
 	    {
 	      if (word & 1)
 		*q2 |= mask;
 	    }
+	  for (word = (unsigned INT_TYPE) *pp++, qq2 = qq1;
+	       word;
+	       word >>= 1, qq2 += rw)
+	    {
+	      if (word & 1)
+		*qq2 |= mask;
+	    }
 	}
     }
 }
+/* APPLE LOCAL end 4321079 */
 
 /* Handle the case where REG is set by the insn being scanned,
    during the forward scan to accumulate conflicts.
@@ -1673,7 +2102,8 @@ mark_reg_live_nc (int regno, enum machine_mode mode)
 
 /* Try to set a preference for an allocno to a hard register.
    We are passed DEST and SRC which are the operands of a SET.  It is known
-   that SRC is a register.  If SRC or the first operand of SRC is a register,
+APPLE LOCAL 4321079 mainline
+   that DEST is a register.  If SRC or the first operand of SRC is a register,
    try to set a preference.  If one of the two is a hard register and the other
    is a pseudo-register, mark the preference.
 
@@ -1684,14 +2114,29 @@ static void
 set_preference (rtx dest, rtx src)
 {
   unsigned int src_regno, dest_regno;
+  /* APPLE LOCAL 4321079 */
+  rtx src_reg = src, dest_reg = dest;
   /* Amount to add to the hard regno for SRC, or subtract from that for DEST,
      to compensate for subregs in SRC or DEST.  */
   int offset = 0;
   unsigned int i;
   int copy = 1;
 
-  if (GET_RTX_FORMAT (GET_CODE (src))[0] == 'e')
+  /* APPLE LOCAL begin 4321079 */
+  /* APPLE LOCAL begin ARM pseudo-pseudo tying */
+  /* Look under SUBREG for vectors; vector-to-vector SUBREGs are NOPs.
+     This code formerly did less testing, which was OK on PPC and x86
+     as vector-to-nonvector SUBREGs did not occur; but they do on ARM. */
+
+  if (GET_RTX_FORMAT (GET_CODE (src))[0] == 'e'
+      && ! (GET_CODE (src) == SUBREG 
+           && REG_P (SUBREG_REG (src))
+           && VECTOR_MODE_P (GET_MODE (src))
+           && VECTOR_MODE_P (GET_MODE (SUBREG_REG (src)))
+           && VECTOR_MODE_P (GET_MODE (dest))))
     src = XEXP (src, 0), copy = 0;
+  /* APPLE LOCAL end ARM pseudo-pseudo tying */
+  /* APPLE LOCAL end 4321079 */
 
   /* Get the reg number for both SRC and DEST.
      If neither is a reg, give up.  */
@@ -1700,6 +2145,8 @@ set_preference (rtx dest, rtx src)
     src_regno = REGNO (src);
   else if (GET_CODE (src) == SUBREG && REG_P (SUBREG_REG (src)))
     {
+      /* APPLE LOCAL 4321079 */
+      src_reg = SUBREG_REG (src);
       src_regno = REGNO (SUBREG_REG (src));
 
       if (REGNO (SUBREG_REG (src)) < FIRST_PSEUDO_REGISTER)
@@ -1718,6 +2165,8 @@ set_preference (rtx dest, rtx src)
     dest_regno = REGNO (dest);
   else if (GET_CODE (dest) == SUBREG && REG_P (SUBREG_REG (dest)))
     {
+      /* APPLE LOCAL 4321079 */
+      dest_reg = SUBREG_REG (dest);
       dest_regno = REGNO (SUBREG_REG (dest));
 
       if (REGNO (SUBREG_REG (dest)) < FIRST_PSEUDO_REGISTER)
@@ -1780,7 +2229,110 @@ set_preference (rtx dest, rtx src)
 	    SET_REGBIT (hard_reg_full_preferences, reg_allocno[dest_regno], i);
 	}
     }
+
+  /* APPLE LOCAL begin 4321079 */
+  /* If both are pseudos record that.  We do this only for "copies", as
+     the current focus is to eliminate vector copies where the two
+     sides have different modes, converted by a SUBREG.  
+     Expansion to reusing the input as output is possible, but there
+     seems little advantage; reload handles this OK usually.
+
+     The mechanism works for non-vectors, but currently
+     produces worse code in many cases; the restriction to vectors here
+     was a late change and is not necessary for correctness.
+
+     Note that pseudos that conflict may be
+     marked as tied here; the data is only used for pseudos that do not
+     conflict. */
+
+  /* APPLE LOCAL begin ARM pseudo-pseudo tying */
+  if (src_regno >= FIRST_PSEUDO_REGISTER && reg_allocno[src_regno] >= 0
+      && (VECTOR_MODE_P (GET_MODE (src_reg)) || TIE_PSEUDOS)
+      && dest_regno >= FIRST_PSEUDO_REGISTER && reg_allocno[dest_regno] >= 0
+      && (VECTOR_MODE_P (GET_MODE (dest_reg)) || TIE_PSEUDOS)
+      && copy)
+  /* APPLE LOCAL end ARM pseudo-pseudo tying */
+    {
+      src_regno += offset;
+      SET_PSEUDO_PREF (reg_allocno[dest_regno], reg_allocno[src_regno]);
+    }
 }
+
+/* Callback for reload.  We are going to assign pseudo R a stack slot;
+   see if a reg tied to it already has one that we can reuse. */
+rtx find_tied_stack_pseudo (int);
+rtx 
+find_tied_stack_pseudo (int r)
+{
+  int i = reg_allocno[r];
+  int j;
+  if (i == -1)
+    return 0;
+  EXECUTE_IF_SET_IN_ALLOCNO_SET(pseudo_preferences + i * allocno_row_words, j,
+    {
+      if (!CONFLICTP(i, j) 
+	  && reg_renumber[allocno[j].reg] < 0
+	  && reg_equiv_memory_loc[allocno[j].reg] != 0
+	  /* APPLE LOCAL begin 4405429 */
+	  && PSEUDO_REGNO_BYTES (allocno[j].reg)
+	      == PSEUDO_REGNO_BYTES (allocno[i].reg)
+	  && strict_memory_address_p (VOIDmode, reg_equiv_memory_loc[allocno[j].reg]))
+	  /* APPLE LOCAL end 4405429 */
+	return copy_rtx (reg_equiv_memory_loc[allocno[j].reg]);
+    });
+  return 0;
+}
+
+/* Callback for reload.  We just altered all the rtx pseudo nodes to contain
+   the hard regs assigned by global allocation.  In the case where the same
+   hard reg was assigned to two pseudos tied by pseudo_preferences but with
+   overlapping live ranges, REG_DEAD notes referring to the common hard reg
+   may now be invalid.  Remove them.  (The algorithm is overly conservative,
+   removing all notes for registers tied by pseudo_preferences without
+   checking that there actually is a live range overlap.)  */
+
+void remove_invalidated_death_notes (rtx);
+void remove_invalidated_death_notes (rtx first)
+{
+  rtx insn;
+  int regno, orig_regno, i, j;
+  rtx r, *pnote, *next_pnote;
+  for (insn = first; insn; insn = NEXT_INSN (insn))
+    if (INSN_P (insn))
+      {
+	for (pnote = &REG_NOTES (insn); *pnote; pnote = next_pnote)
+	  {
+	    next_pnote = &XEXP (*pnote, 1);
+
+	    if (REG_NOTE_KIND (*pnote) == REG_DEAD)
+	      {
+		r = XEXP (*pnote, 0);
+		if (!REG_P (r))
+		  continue;
+		regno = REGNO (r);
+		orig_regno = ORIGINAL_REGNO (r);
+	        if (orig_regno < FIRST_PSEUDO_REGISTER || regno >= FIRST_PSEUDO_REGISTER)
+		  continue;
+		if (regno == orig_regno)
+		  continue;
+		i = reg_allocno[orig_regno];
+		EXECUTE_IF_SET_IN_ALLOCNO_SET(pseudo_preferences + i * allocno_row_words, j,
+		  {
+		    if (i != j
+			&& !CONFLICTP(i, j)
+			&& reg_renumber[allocno[j].reg] == regno)
+		      {
+			*pnote = *next_pnote;
+			next_pnote = pnote;
+			goto next_note;
+		      }
+		  });
+	      }
+	    next_note:;
+	  }
+       }
+}
+/* APPLE LOCAL end 4321079 */
 
 /* Indicate that hard register number FROM was eliminated and replaced with
    an offset from hard register number TO.  The status of hard registers live
@@ -1870,9 +2422,8 @@ build_insn_chain (rtx first)
   struct insn_chain **p = &reload_insn_chain;
   struct insn_chain *prev = 0;
   basic_block b = ENTRY_BLOCK_PTR->next_bb;
-  regset_head live_relevant_regs_head;
 
-  live_relevant_regs = INITIALIZE_REG_SET (live_relevant_regs_head);
+  live_relevant_regs = ALLOC_REG_SET (&reg_obstack);
 
   for (; first; first = NEXT_INSN (first))
     {
@@ -1880,7 +2431,7 @@ build_insn_chain (rtx first)
 
       if (first == BB_HEAD (b))
 	{
-	  int i;
+	  unsigned i;
 	  bitmap_iterator bi;
 
 	  CLEAR_REG_SET (live_relevant_regs);
@@ -1970,11 +2521,12 @@ build_insn_chain (rtx first)
 /* Print debugging trace information if -dg switch is given,
    showing the information on which the allocation decisions are based.  */
 
+/* APPLE LOCAL begin 4321079 */
 static void
 dump_conflicts (FILE *file)
 {
   int i;
-  int has_preferences;
+  int has_preferences, has_copy_preferences, has_pseudo_ties;
   int nregs;
   nregs = 0;
   for (i = 0; i < max_allocno; i++)
@@ -2011,6 +2563,20 @@ dump_conflicts (FILE *file)
 	  fprintf (file, " %d", j);
       fprintf (file, "\n");
 
+      has_pseudo_ties = 0;
+      for (j = 0; j < max_allocno; j++)
+	if (TEST_PSEUDO_PREF (j, i))
+	  {
+	    if (!has_pseudo_ties)
+	      {
+		has_pseudo_ties = 1;
+		fprintf (file, ";; %d pseudo ties:", allocno[i].reg);
+	      }
+	    fprintf (file, " %d", allocno[j].reg);
+	  }
+      if (has_pseudo_ties)
+        fprintf (file, "\n");
+
       has_preferences = 0;
       for (j = 0; j < FIRST_PSEUDO_REGISTER; j++)
 	if (TEST_HARD_REG_BIT (allocno[i].hard_reg_preferences, j))
@@ -2023,9 +2589,28 @@ dump_conflicts (FILE *file)
 	if (TEST_HARD_REG_BIT (allocno[i].hard_reg_preferences, j))
 	  fprintf (file, " %d", j);
       fprintf (file, "\n");
+
+      has_copy_preferences = 0;
+      for (j = 0; j < FIRST_PSEUDO_REGISTER; j++)
+	if (TEST_HARD_REG_BIT (allocno[i].hard_reg_copy_preferences, j))
+	  has_copy_preferences = 1;
+
+      if (! has_copy_preferences)
+	continue;
+      fprintf (file, ";; %d copy preferences:", allocno[i].reg);
+      for (j = 0; j < FIRST_PSEUDO_REGISTER; j++)
+	if (TEST_HARD_REG_BIT (allocno[i].hard_reg_copy_preferences, j))
+	  fprintf (file, " %d", j);
+      fprintf (file, "\n");
     }
   fprintf (file, "\n");
+
+  fprintf (file, "Allocation order:");
+  for (i = 0; i < max_allocno; i++)
+    fprintf(file, " %d", allocno[allocno_order[i]].reg);
+  fprintf (file, "\n");
 }
+/* APPLE LOCAL end 4321079 */
 
 void
 dump_global_regs (FILE *file)
@@ -2033,20 +2618,54 @@ dump_global_regs (FILE *file)
   int i, j;
 
   fprintf (file, ";; Register dispositions:\n");
+  /* APPLE LOCAL begin 5695218 */
   for (i = FIRST_PSEUDO_REGISTER, j = 0; i < max_regno; i++)
-    if (reg_renumber[i] >= 0)
-      {
-	fprintf (file, "%d in %d  ", i, reg_renumber[i]);
-	if (++j % 6 == 0)
-	  fprintf (file, "\n");
-      }
+    {
+      if (!REG_P (regno_reg_rtx[i]))
+	fprintf (file, "pseudo %d: ", i);
+      print_inline_rtx (file, regno_reg_rtx[i], 0);
+      if (reg_renumber[i] > -1)
+	fprintf (file, " w=" HOST_WIDE_INT_PRINT_DEC, local_reg_weight[reg_renumber[i]]);
+      fprintf (file, "\n");
+    }
+  /* APPLE LOCAL end 5695218 */
 
   fprintf (file, "\n\n;; Hard regs used: ");
   for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
     if (regs_ever_live[i])
-      fprintf (file, " %d", i);
+      /* APPLE LOCAL 5695218 */
+      fprintf (file, " %d/%s", i, reg_names[i]);
   fprintf (file, "\n\n");
 }
+
+/* APPLE LOCAL begin 5695218 */
+/* Print out the current global register assignments.  Invoked from the debugger.  */
+void debug_global_regs (void);
+void
+debug_global_regs (void)
+{
+  dump_global_regs (stdout);
+}
+void dump_hard_regset (FILE *, HARD_REG_SET);
+void dump_hard_regset (FILE *file, HARD_REG_SET regset)
+{
+  int i;
+  long long unsigned int ulli;
+  for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
+    {
+      ulli = (1LL << i);
+      if (TEST_HARD_REG_BIT (regset, i) && *reg_names[i])
+	fprintf (file, "  %d=0x%llx/%s", i, ulli, reg_names[i]);
+    }
+  fprintf (file, "\n");
+}
+/* Print out the registers in a hard REGSET.  Invoked from the debugger.  */
+void debug_hard_regset (HARD_REG_SET);
+void debug_hard_regset (HARD_REG_SET regset)
+{
+  dump_hard_regset (stdout, regset);
+}
+/* APPLE LOCAL end 5695218 */
 
 
 
@@ -2078,9 +2697,10 @@ struct bb_info
   /* Registers correspondingly killed (clobbered) and defined but not
      killed afterward in the basic block.  */
   bitmap killed, avloc;
-  /* Registers partially available correspondingly at the start and
-     end of the basic block.  */
-  bitmap pavin, pavout;
+  /* Registers partially available and living (in other words whose
+     values were calculated and used) correspondingly at the start
+     and end of the basic block.  */
+  bitmap live_pavin, live_pavout;
 };
 
 /* Macros for accessing data flow information of basic blocks.  */
@@ -2089,8 +2709,8 @@ struct bb_info
 #define BB_INFO_BY_INDEX(N) BB_INFO (BASIC_BLOCK(N))
 
 /* The function allocates the info structures of each basic block.  It
-   also initialized PAVIN and PAVOUT as if all hard registers were
-   partially available.  */
+   also initialized LIVE_PAVIN and LIVE_PAVOUT as if all hard
+   registers were partially available.  */
 
 static void
 allocate_bb_info (void)
@@ -2101,21 +2721,21 @@ allocate_bb_info (void)
   bitmap init;
 
   alloc_aux_for_blocks (sizeof (struct bb_info));
-  init = BITMAP_XMALLOC ();
+  init = BITMAP_ALLOC (NULL);
   for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
     bitmap_set_bit (init, i);
   FOR_EACH_BB (bb)
     {
       bb_info = bb->aux;
-      bb_info->earlyclobber = BITMAP_XMALLOC ();
-      bb_info->avloc = BITMAP_XMALLOC ();
-      bb_info->killed = BITMAP_XMALLOC ();
-      bb_info->pavin = BITMAP_XMALLOC ();
-      bb_info->pavout = BITMAP_XMALLOC ();
-      bitmap_copy (bb_info->pavin, init);
-      bitmap_copy (bb_info->pavout, init);
+      bb_info->earlyclobber = BITMAP_ALLOC (NULL);
+      bb_info->avloc = BITMAP_ALLOC (NULL);
+      bb_info->killed = BITMAP_ALLOC (NULL);
+      bb_info->live_pavin = BITMAP_ALLOC (NULL);
+      bb_info->live_pavout = BITMAP_ALLOC (NULL);
+      bitmap_copy (bb_info->live_pavin, init);
+      bitmap_copy (bb_info->live_pavout, init);
     }
-  BITMAP_XFREE (init);
+  BITMAP_FREE (init);
 }
 
 /* The function frees the allocated info of all basic blocks.  */
@@ -2129,11 +2749,11 @@ free_bb_info (void)
   FOR_EACH_BB (bb)
     {
       bb_info = BB_INFO (bb);
-      BITMAP_XFREE (bb_info->pavout);
-      BITMAP_XFREE (bb_info->pavin);
-      BITMAP_XFREE (bb_info->killed);
-      BITMAP_XFREE (bb_info->avloc);
-      BITMAP_XFREE (bb_info->earlyclobber);
+      BITMAP_FREE (bb_info->live_pavout);
+      BITMAP_FREE (bb_info->live_pavin);
+      BITMAP_FREE (bb_info->killed);
+      BITMAP_FREE (bb_info->avloc);
+      BITMAP_FREE (bb_info->earlyclobber);
     }
   free_aux_for_blocks ();
 }
@@ -2168,13 +2788,15 @@ mark_reg_change (rtx reg, rtx setter, void *data)
 
 static varray_type earlyclobber_regclass;
 
-/* The function stores classes of registers which could be early
-   clobbered in INSN.  */
+/* This function finds and stores register classes that could be early
+   clobbered in INSN.  If any earlyclobber classes are found, the function
+   returns TRUE, in all other cases it returns FALSE.  */
 
-static void
+static bool
 check_earlyclobber (rtx insn)
 {
   int opno;
+  bool found = false;
 
   extract_insn (insn);
 
@@ -2215,6 +2837,7 @@ check_earlyclobber (rtx insn)
 	    case ',':
 	      if (amp_p && class != NO_REGS)
 		{
+		  found = true;
 		  for (i = VARRAY_ACTIVE_SIZE (earlyclobber_regclass) - 1;
 		       i >= 0; i--)
 		    if (VARRAY_INT (earlyclobber_regclass, i) == (int) class)
@@ -2240,27 +2863,14 @@ check_earlyclobber (rtx insn)
 	  p += CONSTRAINT_LEN (c, p);
 	}
     }
-}
 
-/* The function returns true if register classes C1 and C2 intersect.  */
-
-static bool
-regclass_intersect (enum reg_class c1, enum reg_class c2)
-{
-  HARD_REG_SET rs, zero;
-
-  CLEAR_HARD_REG_SET (zero);
-  COPY_HARD_REG_SET(rs, reg_class_contents [c1]);
-  AND_HARD_REG_SET (rs, reg_class_contents [c2]);
-  GO_IF_HARD_REG_EQUAL (zero, rs, yes);
-  return true;
- yes:
-  return false;
+  return found;
 }
 
 /* The function checks that pseudo-register *X has a class
    intersecting with the class of pseudo-register could be early
-   clobbered in the same insn.  */
+   clobbered in the same insn.
+   This function is a no-op if earlyclobber_regclass is empty.  */
 
 static int
 mark_reg_use_for_earlyclobber (rtx *x, void *data ATTRIBUTE_UNUSED)
@@ -2279,11 +2889,12 @@ mark_reg_use_for_earlyclobber (rtx *x, void *data ATTRIBUTE_UNUSED)
       pref_class = reg_preferred_class (regno);
       alt_class = reg_alternate_class (regno);
       for (i = VARRAY_ACTIVE_SIZE (earlyclobber_regclass) - 1; i >= 0; i--)
-	if (regclass_intersect (VARRAY_INT (earlyclobber_regclass, i),
-				pref_class)
+	if (reg_classes_intersect_p (VARRAY_INT (earlyclobber_regclass, i),
+				     pref_class)
 	    || (VARRAY_INT (earlyclobber_regclass, i) != NO_REGS
-		&& regclass_intersect (VARRAY_INT (earlyclobber_regclass, i),
-				       alt_class)))
+		&& reg_classes_intersect_p (VARRAY_INT (earlyclobber_regclass,
+							i),
+					    alt_class)))
 	  {
 	    bitmap_set_bit (bb_info->earlyclobber, regno);
 	    break;
@@ -2318,8 +2929,8 @@ calculate_local_reg_bb_info (void)
 	if (INSN_P (insn))
 	  {
 	    note_stores (PATTERN (insn), mark_reg_change, bb);
-	    check_earlyclobber (insn);
-	    note_uses (&PATTERN (insn), mark_reg_use_for_earlyclobber_1, bb);
+	    if (check_earlyclobber (insn))
+	      note_uses (&PATTERN (insn), mark_reg_use_for_earlyclobber_1, bb);
 	  }
     }
 }
@@ -2350,40 +2961,23 @@ rpost_cmp (const void *bb1, const void *bb2)
   return BB_INFO (b2)->rts_number - BB_INFO (b1)->rts_number;
 }
 
-/* The function calculates partial availability of registers.  The
-   function calculates partial availability at the end of basic block
-   BB by propagating partial availability at end of predecessor basic
-   block PRED.  The function returns true if the partial availability
-   at the end of BB has been changed or if CHANGED_P.  We have the
-   following equations:
+/* Temporary bitmap used for live_pavin, live_pavout calculation.  */
+static bitmap temp_bitmap;
 
-     bb.pavin = empty for entry block | union (pavout of predecessors)
-     bb.pavout = union (bb.pavin - b.killed, bb.avloc)  */
+/* The function calculates partial register availability according to
+   the following equations:
 
-static bool
-modify_bb_reg_pav (basic_block bb, basic_block pred, bool changed_p)
-{
-  struct bb_info *bb_info;
-  bitmap bb_pavin, bb_pavout;
-
-  bb_info = BB_INFO (bb);
-  bb_pavin = bb_info->pavin;
-  bb_pavout = bb_info->pavout;
-  if (pred->index != ENTRY_BLOCK)
-    bitmap_a_or_b (bb_pavin, bb_pavin, BB_INFO (pred)->pavout);
-  changed_p |= bitmap_union_of_diff (bb_pavout, bb_info->avloc,
-				     bb_pavin, bb_info->killed);
-  return changed_p;
-}
-
-/* The function calculates partial register availability.  */
+     bb.live_pavin
+       = empty for entry block
+         | union (live_pavout of predecessors) & global_live_at_start
+     bb.live_pavout = union (bb.live_pavin - bb.killed, bb.avloc)
+                      & global_live_at_end  */
 
 static void
 calculate_reg_pav (void)
 {
   basic_block bb, succ;
   edge e;
-  bool changed_p;
   int i, nel;
   varray_type bbs, new_bbs, temp;
   basic_block *bb_array;
@@ -2391,6 +2985,7 @@ calculate_reg_pav (void)
 
   VARRAY_BB_INIT (bbs, n_basic_blocks, "basic blocks");
   VARRAY_BB_INIT (new_bbs, n_basic_blocks, "basic blocks for the next iter.");
+  temp_bitmap = BITMAP_ALLOC (NULL);
   FOR_EACH_BB (bb)
     {
       VARRAY_PUSH_BB (bbs, bb);
@@ -2405,21 +3000,38 @@ calculate_reg_pav (void)
       for (i = 0; i < nel; i++)
 	{
 	  edge_iterator ei;
-
+	  struct bb_info *bb_info;
+	  bitmap bb_live_pavin, bb_live_pavout;
+	      
 	  bb = bb_array [i];
-	  changed_p = 0;
+	  bb_info = BB_INFO (bb);
+	  bb_live_pavin = bb_info->live_pavin;
+	  bb_live_pavout = bb_info->live_pavout;
 	  FOR_EACH_EDGE (e, ei, bb->preds)
-	    changed_p = modify_bb_reg_pav (bb, e->src, changed_p);
-	  if (changed_p)
-	    FOR_EACH_EDGE (e, ei, bb->succs)
-	      {
-		succ = e->dest;
-		if (succ->index != EXIT_BLOCK && !TEST_BIT (wset, succ->index))
-		  {
-		    SET_BIT (wset, succ->index);
-		    VARRAY_PUSH_BB (new_bbs, succ);
-		  }
-	      }
+	    {
+	      basic_block pred = e->src;
+
+	      if (pred->index != ENTRY_BLOCK)
+		bitmap_ior_into (bb_live_pavin, BB_INFO (pred)->live_pavout);
+	    }
+	  bitmap_and_into (bb_live_pavin, bb->global_live_at_start);
+	  bitmap_ior_and_compl (temp_bitmap, bb_info->avloc,
+				bb_live_pavin, bb_info->killed);
+	  bitmap_and_into (temp_bitmap, bb->global_live_at_end);
+	  if (! bitmap_equal_p (temp_bitmap, bb_live_pavout))
+	    {
+	      bitmap_copy (bb_live_pavout, temp_bitmap);
+	      FOR_EACH_EDGE (e, ei, bb->succs)
+		{
+		  succ = e->dest;
+		  if (succ->index != EXIT_BLOCK
+		      && !TEST_BIT (wset, succ->index))
+		    {
+		      SET_BIT (wset, succ->index);
+		      VARRAY_PUSH_BB (new_bbs, succ);
+		    }
+		}
+	    }
 	}
       temp = bbs;
       bbs = new_bbs;
@@ -2427,6 +3039,7 @@ calculate_reg_pav (void)
       VARRAY_POP_ALL (new_bbs);
     }
   sbitmap_free (wset);
+  BITMAP_FREE (temp_bitmap);
 }
 
 /* The function modifies partial availability information for two
@@ -2448,7 +3061,7 @@ modify_reg_pav (void)
   CLEAR_HARD_REG_SET (stack_hard_regs);
   for (i = FIRST_STACK_REG; i <= LAST_STACK_REG; i++)
     SET_HARD_REG_BIT(stack_hard_regs, i);
-  stack_regs = BITMAP_XMALLOC ();
+  stack_regs = BITMAP_ALLOC (NULL);
   for (i = FIRST_PSEUDO_REGISTER; i < max_regno; i++)
     {
       COPY_HARD_REG_SET (used, reg_class_contents[reg_preferred_class (i)]);
@@ -2469,27 +3082,42 @@ modify_reg_pav (void)
 	 insn if the pseudo-register is used first time in given BB
 	 and not lived at the BB start.  To prevent this we don't
 	 change life information for such pseudo-registers.  */
-      bitmap_a_or_b (bb_info->pavin, bb_info->pavin, bb_info->earlyclobber);
+      bitmap_ior_into (bb_info->live_pavin, bb_info->earlyclobber);
 #ifdef STACK_REGS
       /* We can not use the same stack register for uninitialized
 	 pseudo-register and another living pseudo-register because if the
 	 uninitialized pseudo-register dies, subsequent pass reg-stack
 	 will be confused (it will believe that the other register
 	 dies).  */
-      bitmap_a_or_b (bb_info->pavin, bb_info->pavin, stack_regs);
+      bitmap_ior_into (bb_info->live_pavin, stack_regs);
 #endif
     }
 #ifdef STACK_REGS
-  BITMAP_XFREE (stack_regs);
+  BITMAP_FREE (stack_regs);
 #endif
 }
 
 /* The following function makes live information more accurate by
    modifying global_live_at_start and global_live_at_end of basic
-   blocks.  After the function call a register lives at a program
-   point only if it is initialized on a path from CFG entry to the
-   program point.  The standard GCC life analysis permits registers to
-   live uninitialized.  */
+   blocks.
+
+   The standard GCC life analysis permits registers to live
+   uninitialized, for example:
+
+       R is never used
+       .....
+       Loop:
+         R is defined
+       ...
+       R is used.
+
+   With normal life_analysis, R would be live before "Loop:".
+   The result is that R causes many interferences that do not
+   serve any purpose.
+
+   After the function call a register lives at a program point
+   only if it is initialized on a path from CFG entry to the
+   program point.  */
 
 static void
 make_accurate_live_analysis (void)
@@ -2508,10 +3136,8 @@ make_accurate_live_analysis (void)
     {
       bb_info = BB_INFO (bb);
       
-      bitmap_a_and_b (bb->global_live_at_start, bb->global_live_at_start,
-		      bb_info->pavin);
-      bitmap_a_and_b (bb->global_live_at_end, bb->global_live_at_end,
-		      bb_info->pavout);
+      bitmap_and_into (bb->global_live_at_start, bb_info->live_pavin);
+      bitmap_and_into (bb->global_live_at_end, bb_info->live_pavout);
     }
   free_bb_info ();
 }

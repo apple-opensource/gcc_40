@@ -1,6 +1,7 @@
 /* Compiler driver program that can handle many languages.
    Copyright (C) 1987, 1989, 1992, 1993, 1994, 1995, 1996, 1997, 1998,
-   1999, 2000, 2001, 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
+   1999, 2000, 2001, 2002, 2003, 2004, 2005 Free Software Foundation,
+   Inc.
 
 This file is part of GCC.
 
@@ -79,6 +80,8 @@ compilation is specified by a string called a "spec".  */
 #if ! defined( SIGCHLD ) && defined( SIGCLD )
 #  define SIGCHLD SIGCLD
 #endif
+/* APPLE LOCAL mainline 2005-09-01 3449986 */
+#include "xregex.h"
 #include "obstack.h"
 #include "intl.h"
 #include "prefix.h"
@@ -244,34 +247,12 @@ static char *cc_print_options = 0;
 static char *cc_print_options_filename;
 /* APPLE LOCAL end CC_PRINT_OPTIONS */
 
-/* APPLE LOCAL constant cfstrings */
-static int use_constant_cfstrings = 0;
-/* APPLE LOCAL begin deployment target */
-/* The deployment target (i.e., the minimum version of MacOS X that
-   the binary is expected to be used on).  */
-static const char *macosx_deployment_target = 0;
-static unsigned int macosx_version_min_required = 0;
-
-/* The following table should be NULL-terminated and kept in 
-   lexicographic order. */
-   
-static struct macosx_vers {
-  const char *vers_str;
-  unsigned int vers_num;
-} macosx_vers_tbl[] = {
-  { "10.0", 1000 },
-  { "10.1", 1010 },
-  { "10.2", 1020 },
-  { "10.3", 1030 },
-  { "10.4", 1040 },
-  { NULL, 0 }
-};  
-/* APPLE LOCAL end deployment target */
-   
 /* Nonzero if cross-compiling.
    When -b is used, the value comes from the `specs' file.  */
 
-#ifdef CROSS_COMPILE
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#ifdef CROSS_DIRECTORY_STRUCTURE
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
 static const char *cross_compile = "1";
 #else
 static const char *cross_compile = "0";
@@ -393,6 +374,10 @@ static const char *convert_filename (const char *, int, int);
 static const char *if_exists_spec_function (int, const char **);
 static const char *if_exists_else_spec_function (int, const char **);
 static const char *replace_outfile_spec_function (int, const char **);
+/* APPLE LOCAL ARM 4256246 */
+static const char *add_sysroot_spec_function (int, const char **);
+/* APPLE LOCAL mainline 2005-09-01 3449986 */
+static const char *version_compare_spec_function (int, const char **);
 
 /* The Specs Language
 
@@ -485,8 +470,6 @@ or with constant text in a single argument.
 	and -B options) as necessary.
  APPLE LOCAL frameworks
  %Q	Substitute -iframework default paths.
- APPLE LOCAL constant cfstrings
- %yC	Emit '-mconstant-cfstrings' option, if needed.
  %s     current argument is the name of a library or startup file of some sort.
         Search for that file in a standard list of directories
 	and substitute the full name found.
@@ -507,8 +490,6 @@ or with constant text in a single argument.
  %l     process LINK_SPEC as a spec.
  %L     process LIB_SPEC as a spec.
  %G     process LIBGCC_SPEC as a spec.
- %M     output multilib_dir with directory separators replaced with "_";
-	if multilib_dir is not set or is ".", output "".
  %S     process STARTFILE_SPEC as a spec.  A capital S is actually used here.
  %E     process ENDFILE_SPEC as a spec.  A capital E is actually used here.
  %C     process CPP_SPEC as a spec.
@@ -552,15 +533,20 @@ or with constant text in a single argument.
           part of that switch that matched the '*'.
  %{.S:X}  substitutes X, if processing a file with suffix S.
  %{!.S:X} substitutes X, if NOT processing a file with suffix S.
-
+ APPLE LOCAL begin mainline 2007-03-13 5040758
+ %{,S:X}  substitutes X, if processing a file which will use spec S.
+ %{!,S:X} substitutes X, if NOT processing a file which will use spec S.
+	  
  %{S|T:X} substitutes X if either -S or -T was given to CC.  This may be
-	  combined with !, ., and * as above binding stronger than the OR.
+	  combined with '!', '.', ',', and '*' as above binding stronger
+	  than the OR.
 	  If %* appears in X, all of the alternatives must be starred, and
 	  only the first matching alternative is substituted.
  %{S:X;   if S was given to CC, substitutes X;
    T:Y;   else if T was given to CC, substitutes Y;
     :D}   else substitutes D.  There can be as many clauses as you need.
-          This may be combined with ., !, |, and * as above.
+          This may be combined with '.', '!', ',', '|', and '*' as above.
+ APPLE LOCAL end mainline 2007-03-13 5040758
 
  %(Spec) processes a specification defined in a specs file as *Spec:
  %[Spec] as above, but put __ around -D arguments
@@ -656,7 +642,7 @@ proper position among the other output files.  */
 #ifndef LIBGCC_SPEC
 #if defined(REAL_LIBGCC_SPEC)
 #define LIBGCC_SPEC REAL_LIBGCC_SPEC
-#elif defined(LINK_LIBGCC_SPECIAL) || defined(LINK_LIBGCC_SPECIAL_1)
+#elif defined(LINK_LIBGCC_SPECIAL_1)
 /* Have gcc do the search for libgcc.a.  */
 #define LIBGCC_SPEC "libgcc.a%s"
 #else
@@ -744,13 +730,8 @@ proper position among the other output files.  */
 /* APPLE LOCAL end add fcreate-profile */
 
 #ifndef LINK_LIBGCC_SPEC
-# ifdef LINK_LIBGCC_SPECIAL
-/* Don't generate -L options for startfile prefix list.  */
-#  define LINK_LIBGCC_SPEC ""
-# else
-/* Do generate them.  */
-#  define LINK_LIBGCC_SPEC "%D"
-# endif
+/* Generate -L options for startfile prefix list.  */
+# define LINK_LIBGCC_SPEC "%D"
 #endif
 
 #ifndef STARTFILE_PREFIX_SPEC
@@ -799,24 +780,26 @@ static const char *sysroot_hdrs_suffix_spec = SYSROOT_HEADERS_SUFFIX_SPEC;
 static const char *trad_capable_cpp =
 "cc1 -E %{traditional|ftraditional|traditional-cpp:-traditional-cpp}";
 
+/* APPLE LOCAL begin pch */
 /* When making PCH file use this.  */
 static const char *pch = 
-"-o %g.s %{!o*:--output-pch=%i.gch} %W{o*:--output-pch=%*}%V";
+/* APPLE LOCAL begin ss2 */
+"-o %g.s %{!o*:--output-pch=%i.gch} %W{o*:--output-pch=%*} \
+ %{fsave-repository=*: \n as %a -o %w%* %g.s %A}%V";
+/* APPLE LOCAL end ss2 */
+/* APPLE LOCAL end pch */
 
 /* We don't wrap .d files in %W{} since a missing .d file, and
    therefore no dependency entry, confuses make into thinking a .o
    file that happens to exist is up-to-date.  */
 static const char *cpp_unique_options =
-/* APPLE LOCAL constant cfstrings */
-"%yC"
 "%{C|CC:%{!E:%eGCC does not support -C or -CC without -E}}\
- %{!traditional:%{!ftraditional:%{!traditional-cpp:%Q}}}\
  %{!Q:-quiet} %{nostdinc*} %{C} %{CC} %{v} %{I*&F*} %{P} %I\
  %{MD:-MD %{!o:%b.d}%{o*:%.d%*}}\
  %{MMD:-MMD %{!o:%b.d}%{o*:%.d%*}}\
  %{M} %{MM} %{MF*} %{MG} %{MP} %{MQ*} %{MT*}\
  %{!E:%{!M:%{!MM:%{MD|MMD:%{o*:-MQ %*}}}}}\
- %{trigraphs} %{remap} %{g3:-dD} %{H} %C %{D*&U*&A*} %{i*} %Z %i\
+ %{remap} %{g3:-dD} %{H} %C %{D*&U*&A*} %{i*} %Z %i\
  %{fmudflap:-D_MUDFLAP -include mf-runtime.h}\
  %{fmudflapth:-D_MUDFLAP -D_MUDFLAPTH -include mf-runtime.h}\
  %{E|M|MM:%W{o*}}";
@@ -827,9 +810,9 @@ static const char *cpp_unique_options =
    options used to set target flags.  Those special target flags settings may
    in turn cause preprocessor symbols to be defined specially.  */
 static const char *cpp_options =
-"%(cpp_unique_options) %1 %{m*} %{std*&ansi} %{W*&pedantic*} %{w} %{f*}\
- %{g*:%{!g0:%{!fno-working-directory:-fworking-directory}}} %{O*} %{undef}\
- %{save-temps:-fpch-preprocess}";
+"%(cpp_unique_options) %1 %{m*} %{std*&ansi&trigraphs} %{W*&pedantic*} %{w}\
+ %{f*} %{g*:%{!g0:%{!fno-working-directory:-fworking-directory}}} %{O*}\
+ %{undef} %{save-temps:-fpch-preprocess}";
 
 /* This contains cpp options which are not passed when the preprocessor
    output will be used by another program.  */
@@ -837,32 +820,32 @@ static const char *cpp_debug_options = "%{d*}";
 
 /* NB: This is shared amongst all front-ends.  */
 static const char *cc1_options =
-/* APPLE LOCAL constant cfstrings */
-"%yC"
 /* APPLE LOCAL begin -fast */
 "%{fast:-O3}\
  %{fastf:-O3}\
  %{fastcp:-O3}"
 /* APPLE LOCAL end -fast */
+/* APPLE LOCAL begin ARM ignore -pg until we can fix it */
 "%{pg:%{fomit-frame-pointer:%e-pg and -fomit-frame-pointer are incompatible}}\
  %1 %{!Q:-quiet} -dumpbase %B %{d*} %{m*} %{a*}\
  %{c|S:%{o*:-auxbase-strip %*}%{!o*:-auxbase %b}}%{!c:%{!S:-auxbase %b}}\
- %{g*} %{O*} %{W*&pedantic*} %{w} %{std*&ansi}\
- %{v:-version} %{pg:-p} %{p} %{f*} %{undef}\
+ %{g*} %{O*} %{W*&pedantic*} %{w} %{std*&ansi&trigraphs}\
+ %{v:-version} "
+#ifdef TARGET_ARM
+  "%{pg:} "
+#else
+  "%{pg:-p} "
+#endif
+"%{p} %{f*} %{undef}\
  %{Qn:-fno-ident} %{--help:--help}\
  %{--target-help:--target-help}\
  %{!fsyntax-only:%{S:%W{o*}%{!o*:-o %b.s}}}\
  %{fsyntax-only:-o %j} %{-param*}\
  %{fmudflap|fmudflapth:-fno-builtin -fno-merge-constants}";
+/* APPLE LOCAL end ARM ignore -pg until we can fix it */
 
 static const char *asm_options =
-/* APPLE LOCAL -fast */
-"%a %Y \
- %{fast:-force_cpusubtype_ALL}\
- %{fastf:-force_cpusubtype_ALL}\
- %{fastcp:-force_cpusubtype_ALL}\
- %{c:%W{o*}%{!o*:-o %w%b%O}}\
-    %{!c:-o %d%w%u%O}";
+"%a %Y %{c:%W{o*}%{!o*:-o %w%b%O}}%{!c:-o %d%w%u%O}";
 
 static const char *invoke_as =
 #ifdef AS_NEEDS_DASH_FOR_PIPED_INPUT
@@ -1013,6 +996,7 @@ static const struct compiler default_compilers[] =
                 %{!fsyntax-only:%(invoke_as)}};:\
 	  %{save-temps|traditional-cpp|no-integrated-cpp:%(trad_capable_cpp) \
 		%(cpp_options) -o %{save-temps:%b.i} %{!save-temps:%g.i} \n\
+"/* APPLE LOCAL predictive compilation */"\
 		    cc1 -fpreprocessed %<fpredictive-compilation* %{save-temps:%b.i} %{!save-temps:%g.i} \
 			%(cc1_options)}\
 	  %{!save-temps:%{!traditional-cpp:%{!no-integrated-cpp:\
@@ -1020,7 +1004,7 @@ static const struct compiler default_compilers[] =
           %{!fsyntax-only:%(invoke_as)}}}}}", 0, 1, 1},
    /* APPLE LOCAL end treat -fast same as -combine --dbj */
   {"-",
-   "%{!E:%e-E required when input is from standard input}\
+   "%{!E:%e-E or -x required when input is from standard input}\
     %(trad_capable_cpp) %(cpp_options) %(cpp_debug_options)", 0, 0, 0},
   {".h", "@c-header", 0, 0, 0},
   {"@c-header",
@@ -1030,16 +1014,20 @@ static const struct compiler default_compilers[] =
       %{!E:%{!M:%{!MM:\
 	  %{save-temps|traditional-cpp|no-integrated-cpp:%(trad_capable_cpp) \
 		%(cpp_options) -o %{save-temps:%b.i} %{!save-temps:%g.i} \n\
+"/* APPLE LOCAL predictive compilation */"\
 		    cc1 -fpreprocessed %<fpredictive-compilation* %{save-temps:%b.i} %{!save-temps:%g.i} \
 			%(cc1_options)\
+"/* APPLE LOCAL pch */"\
                         %(pch)}\
 	  %{!save-temps:%{!traditional-cpp:%{!no-integrated-cpp:\
 		cc1 %(cpp_unique_options) %(cc1_options)\
+"/* APPLE LOCAL pch */"\
                     %(pch)}}}}}}", 0, 0, 0},
   {".i", "@cpp-output", 0, 1, 0},
   {"@cpp-output",
+   /* APPLE LOCAL predictive compilation */
    "%{!M:%{!MM:%{!E:cc1 -fpreprocessed %i %(cc1_options) %<fpredictive-compilation* %{!fsyntax-only:%(invoke_as)}}}}", 0, 1, 0},
-  /* APPLE LOCAL preprocess .s files 2001-07-24 --sts */
+  /* APPLE LOCAL begin preprocess .s files 2001-07-24 --sts */
   /* This is kind of lame; the purpose of having .s and .S be treated
      differently is so that we can control whether to run the
      preprocessor on assembly files.  The standard behavior would
@@ -1047,6 +1035,7 @@ static const struct compiler default_compilers[] =
      but we'd have to get a number of projects to change their files,
      and of course that's just *too* *hard*. */
   {".s", "@assembler-with-cpp", 0, 1, 0},
+  /* APPLE LOCAL end preprocess .s files 2001-07-24 --sts */
   {"@assembler",
    "%{!M:%{!MM:%{!E:%{!S:as %(asm_debug) %(asm_options) %i %A }}}}", 0, 1, 0},
   {".S", "@assembler-with-cpp", 0, 1, 0},
@@ -1165,6 +1154,7 @@ static const struct option_map option_map[] =
    {"--output", "-o", "a"},
    {"--output-class-directory", "-foutput-class-dir=", "ja"},
    {"--param", "--param", "a"},
+   {"--pass-exit-codes", "-pass-exit-codes", 0},
    {"--pedantic", "-pedantic", 0},
    {"--pedantic-errors", "-pedantic-errors", 0},
    {"--pie", "-pie", 0},
@@ -1337,7 +1327,7 @@ translate_options (int *argcp, const char *const **argvp)
 
 		  else if (strchr (arginfo, '*') != 0)
 		    {
-		      error ("incomplete `%s' option", option_map[j].name);
+		      error ("incomplete '%s' option", option_map[j].name);
 		      break;
 		    }
 
@@ -1348,7 +1338,7 @@ translate_options (int *argcp, const char *const **argvp)
 			{
 			  if (i + 1 == argc)
 			    {
-			      error ("missing argument to `%s' option",
+			      error ("missing argument to '%s' option",
 				     option_map[j].name);
 			      break;
 			    }
@@ -1361,7 +1351,7 @@ translate_options (int *argcp, const char *const **argvp)
 		  else if (strchr (arginfo, 'o') == 0)
 		    {
 		      if (arg != 0)
-			error ("extraneous argument to `%s' option",
+			error ("extraneous argument to '%s' option",
 			       option_map[j].name);
 		      arg = 0;
 		    }
@@ -1484,13 +1474,6 @@ static struct path_prefix startfile_prefixes = { 0, 0, "startfile" };
 
 static struct path_prefix include_prefixes = { 0, 0, "include" };
 
-/* APPLE LOCAL begin frameworks */
-#ifdef FRAMEWORK_HEADERS
-/* A vector of the frameworks to search.  */
-static struct path_prefix default_framework_paths = {0, 0, "default_frameworks"};
-#endif /* FRAMEWORK_HEADERS */
-/* APPLE LOCAL end frameworks */
-
 /* Suffix to attach to directories searched for commands.
    This looks like `MACHINE/VERSION/'.  */
 
@@ -1518,7 +1501,9 @@ static const char *gcc_libexec_prefix;
 #define STANDARD_STARTFILE_PREFIX_2 "/usr/lib/"
 #endif
  
-#ifdef CROSS_COMPILE  /* Don't use these prefixes for a cross compiler.  */
+/* APPLE LOCAL begin mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
+#ifdef CROSS_DIRECTORY_STRUCTURE  /* Don't use these prefixes for a cross compiler.  */
+/* APPLE LOCAL end mainline 4.3 2006-12-13 CROSS_DIRECTORY_STRUCTURE 4697325 */
 #undef MD_EXEC_PREFIX
 #undef MD_STARTFILE_PREFIX
 #undef MD_STARTFILE_PREFIX_1
@@ -1656,6 +1641,10 @@ static const struct spec_function static_spec_functions[] =
   { "if-exists",		if_exists_spec_function },
   { "if-exists-else",		if_exists_else_spec_function },
   { "replace-outfile",		replace_outfile_spec_function },
+/* APPLE LOCAL ARM 4256246 */
+  { "add-sysroot",		add_sysroot_spec_function },
+/* APPLE LOCAL mainline 2005-09-01 3449986 */
+  { "version-compare",		version_compare_spec_function },
   { 0, 0 }
 };
 
@@ -1782,11 +1771,7 @@ init_spec (void)
 	if (in_sep && *p == '-' && strncmp (p, "-lgcc", 5) == 0)
 	  {
 	    init_gcc_specs (&obstack,
-#ifdef NO_SHARED_LIBGCC_MULTILIB
 			    "-lgcc_s"
-#else
-			    "-lgcc_s%M"
-#endif
 #ifdef USE_LIBUNWIND_EXCEPTIONS
 			    " -lunwind"
 #endif
@@ -1794,7 +1779,11 @@ init_spec (void)
 			    "-lgcc",
 			    "-lgcc_eh"
 #ifdef USE_LIBUNWIND_EXCEPTIONS
+# ifdef HAVE_LD_STATIC_DYNAMIC
+			    " %{!static:-Bstatic} -lunwind %{!static:-Bdynamic}"
+# else
 			    " -lunwind"
+# endif
 #endif
 			    );
 
@@ -1806,12 +1795,7 @@ init_spec (void)
 	    /* Ug.  We don't know shared library extensions.  Hope that
 	       systems that use this form don't do shared libraries.  */
 	    init_gcc_specs (&obstack,
-#ifdef NO_SHARED_LIBGCC_MULTILIB
-			    "-lgcc_s"
-#else
-			    "-lgcc_s%M"
-#endif
-			    ,
+			    "-lgcc_s",
 			    "libgcc.a%s",
 			    "libgcc_eh.a%s"
 #ifdef USE_LIBUNWIND_EXCEPTIONS
@@ -2655,6 +2639,8 @@ find_a_file (struct path_prefix *pprefix, const char *name, int mode,
 
 enum path_prefix_priority
 {
+  /* APPLE LOCAL isysroot 5083137 */
+  PREFIX_PRIORITY_FIRST,
   PREFIX_PRIORITY_B_OPT,
   PREFIX_PRIORITY_LAST
 };
@@ -2712,7 +2698,7 @@ add_sysrooted_prefix (struct path_prefix *pprefix, const char *prefix,
 		      int require_machine_suffix, int os_multilib)
 {
   if (!IS_ABSOLUTE_PATH (prefix))
-    fatal ("system path `%s' is not absolute", prefix);
+    fatal ("system path '%s' is not absolute", prefix);
 
   if (target_system_root)
     {
@@ -3063,18 +3049,27 @@ static struct switchstr *switches;
 
 static int n_switches;
 
+/* APPLE LOCAL begin mainline */
+/* Language is one of three things:
+
+   1) The name of a real programming language.
+   2) NULL, indicating that no one has figured out
+   what it is yet.
+   3) '*', indicating that the file should be passed
+   to the linker.  */
+/* APPLE LOCAL end mainline */
 struct infile
 {
   const char *name;
   const char *language;
-  /* APPLE LOCAL begin IMI */
+  /* APPLE LOCAL begin IMA */
   struct compiler *incompiler;
 
   /* Use separate temp file for each input file.  */
   const char *temp_filename;
   bool compiled;
   bool preprocessed;
-  /* APPLE LOCAL end IMI */
+  /* APPLE LOCAL end IMA */
 };
 
 /* Also a vector of input files specified.  */
@@ -3095,7 +3090,7 @@ static int traditional_cpp_flag = 0;
 
 /* True if "-E" appears on commandline.  */
 static int capital_e_flag = 0;
-/* APPLE LOCAL end */
+/* APPLE LOCAL end IMA variables */
 
 /* This counts the number of libraries added by lang_specific_driver, so that
    we can tell if there were any user supplied any files or libraries.  */
@@ -3341,7 +3336,7 @@ process_command (int argc, const char **argv)
 	      argv += 2;
 	    }
 	  else
-	    fatal ("`-%c' option must have argument", opt);
+	    fatal ("'-%c' option must have argument", opt);
 	  if (opt == 'V')
 	    new_version = arg;
 	  else
@@ -3363,7 +3358,7 @@ process_command (int argc, const char **argv)
       new_argv[0] = new_argv0;
 
       execvp (new_argv0, new_argv);
-      fatal ("couldn't run `%s': %s", new_argv0, xstrerror (errno));
+      fatal ("couldn't run '%s': %s", new_argv0, xstrerror (errno));
     }
 
   /* Set up the default search paths.  If there is no GCC_EXEC_PREFIX,
@@ -3513,24 +3508,6 @@ process_command (int argc, const char **argv)
 	}
     }
 
-  /* APPLE LOCAL begin deployment target */
-  /* Retrieve the deployment target from the environment, and then decide
-     whether to enable '-fconstant-cfstrings' by default.  */
-  macosx_deployment_target = getenv ("MACOSX_DEPLOYMENT_TARGET");
-  if (macosx_deployment_target)
-    {
-      struct macosx_vers *v = macosx_vers_tbl;
-
-      while (v->vers_str && strcmp (macosx_deployment_target, v->vers_str))
-	v++;
-      if (v->vers_str)
-	{
-	  macosx_version_min_required = v->vers_num;
-	  use_constant_cfstrings = (macosx_version_min_required >= 1020);
-	}
-    }
-  /* APPLE LOCAL end deployment target */
-
   /* Convert new-style -- options to old-style.  */
   translate_options (&argc, (const char *const **) &argv);
 
@@ -3567,7 +3544,7 @@ process_command (int argc, const char **argv)
 	{
 	  /* translate_options () has turned --version into -fversion.  */
 	  printf (_("%s (GCC) %s\n"), programname, version_string);
-	  printf ("Copyright %s 2004 Free Software Foundation, Inc.\n",
+	  printf ("Copyright %s 2005 Free Software Foundation, Inc.\n",
 		  _("(C)"));
 	  fputs (_("This is free software; see the source for copying conditions.  There is NO\n\
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"),
@@ -3677,7 +3654,7 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
       else if (strcmp (argv[i], "-Xlinker") == 0)
 	{
 	  if (i + 1 == argc)
-	    fatal ("argument to `-Xlinker' is missing");
+	    fatal ("argument to '-Xlinker' is missing");
 
 	  n_infiles++;
 	  i++;
@@ -3685,21 +3662,21 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
       else if (strcmp (argv[i], "-Xpreprocessor") == 0)
 	{
 	  if (i + 1 == argc)
-	    fatal ("argument to `-Xpreprocessor' is missing");
+	    fatal ("argument to '-Xpreprocessor' is missing");
 
 	  add_preprocessor_option (argv[i+1], strlen (argv[i+1]));
 	}
       else if (strcmp (argv[i], "-Xassembler") == 0)
 	{
 	  if (i + 1 == argc)
-	    fatal ("argument to `-Xassembler' is missing");
+	    fatal ("argument to '-Xassembler' is missing");
 
 	  add_assembler_option (argv[i+1], strlen (argv[i+1]));
 	}
       else if (strcmp (argv[i], "-l") == 0)
 	{
 	  if (i + 1 == argc)
-	    fatal ("argument to `-l' is missing");
+	    fatal ("argument to '-l' is missing");
 
 	  n_infiles++;
 	  i++;
@@ -3731,6 +3708,8 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
         }
       /* APPLE LOCAL end IMA */
       /* APPLE LOCAL begin -weak_* (radar 3235250) */
+      else if (strncmp (argv[i], "-weak-l", 7) == 0)
+	n_infiles++;
       else if (strcmp (argv[i], "-weak_library") == 0)
 	{
 	  if (i + 1 == argc)
@@ -3757,7 +3736,7 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 	{
 	  struct user_specs *user = xmalloc (sizeof (struct user_specs));
 	  if (++i >= argc)
-	    fatal ("argument to `-specs' is missing");
+	    fatal ("argument to '-specs' is missing");
 
 	  user->next = (struct user_specs *) 0;
 	  user->filename = argv[i];
@@ -3771,7 +3750,7 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 	{
 	  struct user_specs *user = xmalloc (sizeof (struct user_specs));
 	  if (strlen (argv[i]) == 7)
-	    fatal ("argument to `-specs=' is missing");
+	    fatal ("argument to '-specs=' is missing");
 
 	  user->next = (struct user_specs *) 0;
 	  user->filename = argv[i] + 7;
@@ -3799,12 +3778,6 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 	  verbose_only_flag++;
 	  verbose_flag++;
 	}
-      /* APPLE LOCAL begin constant cfstrings */
-      else if (strcmp (argv[i], "-fconstant-cfstrings") == 0)
-	use_constant_cfstrings = 1;
-      else if (strcmp (argv[i], "-fno-constant-cfstrings") == 0)
-	use_constant_cfstrings = 0;
-      /* APPLE LOCAL end constant cfstrings */
       /* APPLE LOCAL begin frameworks */
       else if (strcmp (argv[i], "-framework") == 0)
 	{
@@ -3824,7 +3797,7 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 	    {
 	    case 'b':
 	    case 'V':
-	      fatal ("`-%c' must come at the start of the command line", c);
+	      fatal ("'-%c' must come at the start of the command line", c);
 	      break;
 
 	    case 'B':
@@ -3833,7 +3806,7 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 		int len;
 
 		if (p[1] == 0 && i + 1 == argc)
-		  fatal ("argument to `-B' is missing");
+		  fatal ("argument to '-B' is missing");
 		if (p[1] == 0)
 		  value = argv[++i];
 		else
@@ -3897,8 +3870,6 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 	      if (p[1] != 0)
 		break;
 	      verbose_flag++;
-	      if (strcmp (linker_name_spec, "collect2") == 0)
-		add_linker_option ("-v", 2);
 	      break;
 
 	    case 'S':
@@ -4102,33 +4073,6 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
   /* More prefixes are enabled in main, after we read the specs file
      and determine whether this is cross-compilation or not.  */
 
-  /* APPLE LOCAL begin constant cfstrings */
-  /* Check if '-fconstant-cfstrings' usage is valid, given our deployment
-     target.  If not, issue a warning and then suppress the option.  */
-  if (use_constant_cfstrings)
-    {
-      if (macosx_version_min_required && macosx_version_min_required < 1020)
-	{
-	  error ("warning: `-fconstant-cfstrings' ignored because MACOSX_DEPLOYMENT_TARGET is \"%s\"",
-		 macosx_deployment_target);
-	  use_constant_cfstrings = 0;
-	}
-    }
-  /* APPLE LOCAL end constant cfstrings */
-  /* APPLE LOCAL begin deployment target */
-  /* Synthesize the deployment target manifest constant.  */
-  if (macosx_version_min_required)
-    {
-#define VERSION_MIN_REQUIRED_FMT "-D__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__=%d"
-      char *macro_def = xmalloc (strlen (VERSION_MIN_REQUIRED_FMT) + 30);
-      
-      sprintf (macro_def, VERSION_MIN_REQUIRED_FMT, macosx_version_min_required);
-      add_preprocessor_option (macro_def, strlen (macro_def));
-      free (macro_def);
-#undef VERSION_MIN_REQUIRED_FMT
-    }    
-  /* APPLE LOCAL end deployment target */
-    
   /* Then create the space for the vectors and scan again.  */
 
   switches = xmalloc ((n_switches + 1) * sizeof (struct switchstr));
@@ -4276,12 +4220,6 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 	;
       else if (strcmp (argv[i], "-###") == 0)
 	;
-      /* APPLE LOCAL begin constant cfstrings */
-      else if (strcmp (argv[i], "-fconstant-cfstrings") == 0)
-	;
-      else if (strcmp (argv[i], "-fno-constant-cfstrings") == 0)
-	;
-      /* APPLE LOCAL end constant cfstrings */
       /* APPLE LOCAL begin frameworks */
       else if (strcmp (argv[i], "-framework") == 0)
         {
@@ -4299,7 +4237,7 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 	  if (c == 'x')
 	    {
 	      if (p[1] == 0 && i + 1 == argc)
-		fatal ("argument to `-x' is missing");
+		fatal ("argument to '-x' is missing");
 	      if (p[1] == 0)
 		spec_lang = argv[++i];
 	      else
@@ -4327,7 +4265,7 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
 		  n_args = SWITCH_TAKES_ARG (c) - (p[1] != 0);
 		}
 	      if (i + n_args >= argc)
-		fatal ("argument to `-%s' is missing", p);
+		fatal ("argument to '-%s' is missing", p);
 	      switches[n_switches].args
 		= xmalloc ((n_args + 1) * sizeof(const char *));
 	      while (j < n_args)
@@ -4388,7 +4326,7 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
     }
 
   if (n_infiles == last_language_n_infiles && spec_lang != 0)
-    error ("warning: `-x %s' after last input file has no effect", spec_lang);
+    error ("warning: '-x %s' after last input file has no effect", spec_lang);
 
   /* Ensure we only invoke each subprocess once.  */
   if (target_help_flag || print_help_list)
@@ -4548,8 +4486,9 @@ do_spec (const char *spec)
 {
   int value;
 
-  /* APPLE LOCAL %b/save-temps can clobber input file (radar 2871891) --ilr */
+  /* APPLE LOCAL begin %b/save-temps can clobber input file (radar 2871891) --ilr */
   this_is_basename_derived_file = 0;
+  /* APPLE LOCAL end %b/save-temps can clobber input file (radar 2871891) --ilr */
 
   value = do_spec_2 (spec);
 
@@ -4901,11 +4840,10 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	    if (this_is_basename_derived_file)
 	      string = check_basename_derived_file (string);
 	    else if (this_is_library_file)
-	    /* APPLE LOCAL end %b/save-temps can clobber input file (radar 2871891) --ilr */
 	      string = find_file (string);
-	    /* APPLE LOCAL %b/save-temps can clobber input file (radar 2871891) --ilr */
 	    store_arg (string, delete_this_arg, this_is_output_file 
 	    			                || this_is_basename_derived_file);
+	    /* APPLE LOCAL end %b/save-temps can clobber input file (radar 2871891) --ilr */
 	    if (this_is_output_file)
 	      outfiles[input_file_number] = string;
 	  }
@@ -4954,11 +4892,10 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	    if (this_is_basename_derived_file)
 	      string = check_basename_derived_file (string);
 	    else if (this_is_library_file)
-	    /* APPLE LOCAL end %b/save-temps can clobber input file (radar 2871891) --ilr */
 	      string = find_file (string);
-	    /* APPLE LOCAL radar 2871891 - %b/save-temps can clobber input file --ilr */
 	    store_arg (string, delete_this_arg, this_is_output_file 
 	    			                || this_is_basename_derived_file);
+	    /* APPLE LOCAL end %b/save-temps can clobber input file (radar 2871891) --ilr */
 	    if (this_is_output_file)
 	      outfiles[input_file_number] = string;
 	  }
@@ -4979,11 +4916,10 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	    if (this_is_basename_derived_file)
 	      string = check_basename_derived_file (string);
 	    else if (this_is_library_file)
-	    /* APPLE LOCAL end %b/save-temps can clobber input file (radar 2871891) --ilr */
 	      string = find_file (string);
-	    /* APPLE LOCAL %b/save-temps can clobber input file (radar 2871891) --ilr */
 	    store_arg (string, delete_this_arg, this_is_output_file 
 	    			                || this_is_basename_derived_file);
+	    /* APPLE LOCAL end %b/save-temps can clobber input file (radar 2871891) --ilr */
 	    if (this_is_output_file)
 	      outfiles[input_file_number] = string;
 	  }
@@ -5010,7 +4946,6 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	    break;
 
 	  case 'B':
-	    /* APPLE LOCAL %b/save-temps can clobber input file (radar 2871891) --ilr */
 	    obstack_grow (&obstack, input_basename, suffixed_basename_length);
 	    arg_going = 1;
 	    break;
@@ -5142,7 +5077,7 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 		    p += 2;
 		    /* We don't support extra suffix characters after %O.  */
 		    if (*p == '.' || ISALPHA ((unsigned char) *p))
-		      fatal ("spec '%s' has invalid `%%0%c'", spec, *p);
+		      fatal ("spec '%s' has invalid '%%0%c'", spec, *p);
 		    if (suffix_length == 0)
 		      suffix = TARGET_OBJECT_SUFFIX;
 		    else
@@ -5271,17 +5206,15 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	    break;
 
 	  case 'i':
-/* APPLE LOCAL begin IMI */
 	    if (combine_inputs)
 	      {
 		for (i = 0; (int) i < n_infiles; i++)
-                 if ((!infiles[i].language) || (infiles[i].language[0] != '*'))
-                   if (infiles[i].incompiler == input_file_compiler)
-                     {
-                       store_arg (infiles[i].name, 0, 0);
-                       infiles[i].compiled = TRUE;
-                     }
-/* APPLE LOCAL end IMI */
+		  if ((!infiles[i].language) || (infiles[i].language[0] != '*'))
+		    if (infiles[i].incompiler == input_file_compiler)
+		      {
+			store_arg (infiles[i].name, 0, 0);
+			infiles[i].compiled = true;
+		      }
 	      }
 	    else
 	      {
@@ -5321,45 +5254,6 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	    }
 	    break;
 
-	    /* APPLE LOCAL begin frameworks */
-	  case 'Q':
-#ifdef FRAMEWORK_HEADERS
-	    {
-	      struct prefix_list *dfpl = default_framework_paths.plist;
-
-	      for (; dfpl; dfpl = dfpl->next)
-		{
-		  char *tmpstr = xmalloc (strlen (dfpl->prefix) + 5);
-		  sprintf (tmpstr, "-F%s", dfpl->prefix);
-		  do_spec_1 (tmpstr, 1, NULL);
-		  do_spec_1 (" ", 0, NULL);		/* fh */
-		  free (tmpstr);
-		}
-	    }
-#endif /* FRAMEWORK_HEADERS */
-	    break;
-	    /* APPLE LOCAL end frameworks */
-
-	    /* APPLE LOCAL begin constant cfstrings */
-	  case 'y':
-	    {
-	      int c1 = *p++;
-		  
-	      if (c1 == 'C')
-		{
-		  if (use_constant_cfstrings)
-		    {
-		      do_spec_1 (" ", 0, NULL);
-		      do_spec_1 ("-mconstant-cfstrings", 1, NULL);
-		      do_spec_1 (" ", 0, NULL);
-		    }
-		}
-	      else
-		abort ();
- 	    }
-	    break;
-	    /* APPLE LOCAL end constant cfstrings */
-
 	  case 'o':
 	    {
 	      int max = n_infiles;
@@ -5393,7 +5287,7 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	      int cur_index = argbuf_index;
 	      /* Handle the {...} following the %W.  */
 	      if (*p != '{')
-		fatal ("spec `%s' has invalid `%%W%c", spec, *p);
+		fatal ("spec '%s' has invalid '%%W%c", spec, *p);
 	      p = handle_braces (p + 1);
 	      if (p == 0)
 		return -1;
@@ -5424,7 +5318,7 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 
 	      /* Skip past the option value and make a copy.  */
 	      if (*p != '{')
-		fatal ("spec `%s' has invalid `%%x%c'", spec, *p);
+		fatal ("spec '%s' has invalid '%%x%c'", spec, *p);
 	      while (*p++ != '}')
 		;
 	      string = save_string (p1 + 1, p - p1 - 2);
@@ -5533,23 +5427,6 @@ do_spec_1 (const char *spec, int inswitch, const char *soft_matched_part)
 	    value = do_spec_1 (libgcc_spec, 0, NULL);
 	    if (value != 0)
 	      return value;
-	    break;
-
-	  case 'M':
-	    if (multilib_dir && strcmp (multilib_dir, ".") != 0)
-	      {
-		char *p;
-		const char *q;
-		size_t len;
-
-		len = strlen (multilib_dir);
-		obstack_blank (&obstack, len + 1);
-		p = obstack_next_free (&obstack) - (len + 1);
-
-		*p++ = '_';
-		for (q = multilib_dir; *q ; ++q, ++p)
-		  *p = (IS_DIR_SEPARATOR (*q) ? '_' : *q);
-	      }
 	    break;
 
 	  case 'R':
@@ -5805,7 +5682,7 @@ eval_spec_function (const char *func, const char *args)
 
   sf = lookup_spec_function (func);
   if (sf == NULL)
-    fatal ("unknown spec function `%s'", func);
+    fatal ("unknown spec function '%s'", func);
 
   /* Push the spec processing context.  */
   save_argbuf_index = argbuf_index;
@@ -5824,7 +5701,7 @@ eval_spec_function (const char *func, const char *args)
 
   alloc_args ();
   if (do_spec_2 (args) < 0)
-    fatal ("error in args to spec function `%s'", func);
+    fatal ("error in args to spec function '%s'", func);
 
   /* argbuf_index is an index for the next argument to be inserted, and
      so contains the count of the args already inserted.  */
@@ -5916,12 +5793,27 @@ handle_spec_function (const char *p)
    input suffix matches the atom bracketed by ATOM and END_ATOM.  */
 static inline bool
 input_suffix_matches (const char *atom, const char *end_atom)
+/* APPLE LOCAL begin mainline 2007-03-13 5040758 */ \
 {
   return (input_suffix
 	  && !strncmp (input_suffix, atom, end_atom - atom)
 	  && input_suffix[end_atom - atom] == '\0');
 }
 
+/* Subroutine of handle_braces.  Returns true if the current
+   input file's spec name matches the atom bracketed by ATOM and END_ATOM.  */
+static bool
+input_spec_matches (const char *atom, const char *end_atom)
+{
+  return (input_file_compiler
+	  && input_file_compiler->suffix
+	  && input_file_compiler->suffix[0] != '\0'
+	  && !strncmp (input_file_compiler->suffix + 1, atom,
+		       end_atom - atom)
+	  && input_file_compiler->suffix[end_atom - atom + 1] == '\0');
+}
+
+/* APPLE LOCAL end mainline 2007-03-13 5040758 */ \
 /* Inline subroutine of handle_braces.  Returns true if a switch
    matching the atom bracketed by ATOM and END_ATOM appeared on the
    command line.  */
@@ -5985,6 +5877,9 @@ handle_braces (const char *p)
   const char *orig = p;
 
   bool a_is_suffix;
+/* APPLE LOCAL begin mainline 2007-03-13 5040758 */ \
+  bool a_is_spectype;
+/* APPLE LOCAL end mainline 2007-03-13 5040758 */ \
   bool a_is_starred;
   bool a_is_negated;
   bool a_matched;
@@ -6004,10 +5899,16 @@ handle_braces (const char *p)
       if (a_must_be_last)
 	goto invalid;
 
+/* APPLE LOCAL begin mainline 2007-03-13 5040758 */ \
       /* Scan one "atom" (S in the description above of %{}, possibly
-	 with !, ., or * modifiers).  */
-      a_matched = a_is_suffix = a_is_starred = a_is_negated = false;
+	 with '!', '.', '@', ',', or '*' modifiers).  */
+      a_matched = false;
+      a_is_suffix = false;
+      a_is_starred = false;
+      a_is_negated = false;
+      a_is_spectype = false;
 
+/* APPLE LOCAL end mainline 2007-03-13 5040758 */ \
       SKIP_WHITE();
       if (*p == '!')
 	p++, a_is_negated = true;
@@ -6015,7 +5916,11 @@ handle_braces (const char *p)
       SKIP_WHITE();
       if (*p == '.')
 	p++, a_is_suffix = true;
+/* APPLE LOCAL begin mainline 2007-03-13 5040758 */ \
+      else if (*p == ',')
+	p++, a_is_spectype = true;
 
+/* APPLE LOCAL end mainline 2007-03-13 5040758 */ \
       atom = p;
       while (ISIDNUM(*p) || *p == '-' || *p == '+' || *p == '='
 	     || *p == ',' || *p == '.' || *p == '@')
@@ -6032,7 +5937,9 @@ handle_braces (const char *p)
 	  /* Substitute the switch(es) indicated by the current atom.  */
 	  ordered_set = true;
 	  if (disjunct_set || n_way_choice || a_is_negated || a_is_suffix
-	      || atom == end_atom)
+/* APPLE LOCAL begin mainline 2007-03-13 5040758 */ \
+	      || a_is_spectype || atom == end_atom)
+/* APPLE LOCAL end mainline 2007-03-13 5040758 */ \
 	    goto invalid;
 
 	  mark_matching_switches (atom, end_atom, a_is_starred);
@@ -6051,7 +5958,10 @@ handle_braces (const char *p)
 	  if (atom == end_atom)
 	    {
 	      if (!n_way_choice || disj_matched || *p == '|'
-		  || a_is_negated || a_is_suffix || a_is_starred)
+/* APPLE LOCAL begin mainline 2007-03-13 5040758 */ \
+		  || a_is_negated || a_is_suffix || a_is_spectype 
+		  || a_is_starred)
+/* APPLE LOCAL end mainline 2007-03-13 5040758 */ \
 		goto invalid;
 
 	      /* An empty term may appear as the last choice of an
@@ -6062,28 +5972,32 @@ handle_braces (const char *p)
 	    }
 	  else
 	    {
-	       if (a_is_suffix && a_is_starred)
-		 goto invalid;
+/* APPLE LOCAL begin mainline 2007-03-13 5040758 */ \
+	      if ((a_is_suffix || a_is_spectype) && a_is_starred)
+		goto invalid;
+	      
+	      if (!a_is_starred)
+		disj_starred = false;
 
-	       if (!a_is_starred)
-		 disj_starred = false;
-
-	       /* Don't bother testing this atom if we already have a
-                  match.  */
-	       if (!disj_matched && !n_way_matched)
-		 {
-		   if (a_is_suffix)
-		     a_matched = input_suffix_matches (atom, end_atom);
-		   else
-		     a_matched = switch_matches (atom, end_atom, a_is_starred);
-
-		   if (a_matched != a_is_negated)
-		     {
-		       disj_matched = true;
-		       d_atom = atom;
-		       d_end_atom = end_atom;
-		     }
-		 }
+	      /* Don't bother testing this atom if we already have a
+		 match.  */
+	      if (!disj_matched && !n_way_matched)
+		{
+		  if (a_is_suffix)
+		    a_matched = input_suffix_matches (atom, end_atom);
+		  else if (a_is_spectype)
+		    a_matched = input_spec_matches (atom, end_atom);
+		  else
+		    a_matched = switch_matches (atom, end_atom, a_is_starred);
+		  
+		  if (a_matched != a_is_negated)
+		    {
+		      disj_matched = true;
+		      d_atom = atom;
+		      d_end_atom = end_atom;
+		    }
+		}
+/* APPLE LOCAL end mainline 2007-03-13 5040758 */ \
 	    }
 
 	  if (*p == ':')
@@ -6117,7 +6031,7 @@ handle_braces (const char *p)
   return p;
   
  invalid:
-  fatal ("braced spec `%s' is invalid at `%c'", orig, *p);
+  fatal ("braced spec '%s' is invalid at '%c'", orig, *p);
   
 #undef SKIP_WHITE
 }
@@ -6205,7 +6119,7 @@ process_brace_body (const char *p, const char *atom, const char *end_atom,
   return p;
 
  invalid:
-  fatal ("braced spec body `%s' is invalid", body);
+  fatal ("braced spec body '%s' is invalid", body);
 }
 
 /* Return 0 iff switch number SWITCHNUM is obsoleted by a later switch
@@ -6465,8 +6379,7 @@ int
 main (int argc, const char **argv)
 {
   size_t i;
-  /* APPLE LOCAL mainline hack, remove next merge */
-  int value = 0;
+  int value;
   int linker_was_run = 0;
   int lang_n_infiles = 0;
   int num_linker_inputs = 0;
@@ -6491,6 +6404,9 @@ main (int argc, const char **argv)
   /* Perform host dependent initialization when needed.  */
   GCC_DRIVER_HOST_INITIALIZATION;
 #endif
+
+  /* Unlock the stdio streams.  */
+  unlock_std_streams ();
 
   gcc_init_libintl ();
 
@@ -6652,6 +6568,12 @@ main (int argc, const char **argv)
         target_sysroot_hdrs_suffix = xstrdup (argbuf[argbuf_index -1]);
     }
 
+/* APPLE LOCAL begin isysroot 5083137 */
+#ifndef SYSROOT_PRIORITY
+#define SYSROOT_PRIORITY PREFIX_PRIORITY_LAST
+#endif
+/* APPLE LOCAL end isysroot 5083137 */
+
   /* Look for startfiles in the standard places.  */
   if (*startfile_prefix_spec != 0
       && do_spec_2 (startfile_prefix_spec) == 0
@@ -6660,7 +6582,8 @@ main (int argc, const char **argv)
       int ndx;
       for (ndx = 0; ndx < argbuf_index; ndx++)
 	add_sysrooted_prefix (&startfile_prefixes, argbuf[ndx], "BINUTILS",
-			      PREFIX_PRIORITY_LAST, 0, 1);
+			      /* APPLE LOCAL isysroot 5083137 */
+			      SYSROOT_PRIORITY, 0, 1);
     }
   /* We should eventually get rid of all these and stick to
      startfile_prefix_spec exclusively.  */
@@ -6668,15 +6591,18 @@ main (int argc, const char **argv)
     {
       if (*md_exec_prefix)
 	add_sysrooted_prefix (&startfile_prefixes, md_exec_prefix, "GCC",
-			      PREFIX_PRIORITY_LAST, 0, 1);
+			      /* APPLE LOCAL isysroot 5083137 */
+			      SYSROOT_PRIORITY, 0, 1);
 
       if (*md_startfile_prefix)
 	add_sysrooted_prefix (&startfile_prefixes, md_startfile_prefix,
-			      "GCC", PREFIX_PRIORITY_LAST, 0, 1);
+			      /* APPLE LOCAL isysroot 5083137 */
+			      "GCC", SYSROOT_PRIORITY, 0, 1);
 
       if (*md_startfile_prefix_1)
 	add_sysrooted_prefix (&startfile_prefixes, md_startfile_prefix_1,
-			      "GCC", PREFIX_PRIORITY_LAST, 0, 1);
+			      /* APPLE LOCAL isysroot 5083137 */
+			      "GCC", SYSROOT_PRIORITY, 0, 1);
 
       /* If standard_startfile_prefix is relative, base it on
 	 standard_exec_prefix.  This lets us move the installed tree
@@ -6688,7 +6614,8 @@ main (int argc, const char **argv)
       if (IS_ABSOLUTE_PATH (standard_startfile_prefix))
 	add_sysrooted_prefix (&startfile_prefixes,
 			      standard_startfile_prefix, "BINUTILS",
-			      PREFIX_PRIORITY_LAST, 0, 1);
+			      /* APPLE LOCAL isysroot 5083137 */
+			      SYSROOT_PRIORITY, 0, 1);
       else if (*cross_compile == '0')
 	{
 	  if (gcc_exec_prefix)
@@ -6696,21 +6623,35 @@ main (int argc, const char **argv)
 			concat (gcc_exec_prefix, machine_suffix,
 				standard_startfile_prefix, NULL),
 			NULL, PREFIX_PRIORITY_LAST, 0, 1);
-	  add_prefix (&startfile_prefixes,
-		      concat (standard_exec_prefix,
-			      machine_suffix,
-			      standard_startfile_prefix, NULL),
-		      NULL, PREFIX_PRIORITY_LAST, 0, 1);
+
+	  /* APPLE LOCAL begin ARM sysroot startfile_prefixes */
+	  /* All absolute startfile_prefixes must be sysrooted so we
+	     don't pick up host headers.  */
+	  if (IS_ABSOLUTE_PATH (standard_exec_prefix))
+	    add_sysrooted_prefix (&startfile_prefixes,
+				  concat (standard_exec_prefix,
+					  machine_suffix,
+					  standard_startfile_prefix, NULL),
+				  NULL, PREFIX_PRIORITY_LAST, 0, 1);
+	  else
+	    add_prefix (&startfile_prefixes,
+			concat (standard_exec_prefix,
+				machine_suffix,
+				standard_startfile_prefix, NULL),
+			NULL, PREFIX_PRIORITY_LAST, 0, 1);
+	  /* APPLE LOCAL end ARM sysroot startfile_prefixes */
 	}
 
       if (*standard_startfile_prefix_1)
  	add_sysrooted_prefix (&startfile_prefixes,
 			      standard_startfile_prefix_1, "BINUTILS",
-			      PREFIX_PRIORITY_LAST, 0, 1);
+			      /* APPLE LOCAL isysroot 5083137 */
+			      SYSROOT_PRIORITY, 0, 1);
       if (*standard_startfile_prefix_2)
 	add_sysrooted_prefix (&startfile_prefixes,
 			      standard_startfile_prefix_2, "BINUTILS",
-			      PREFIX_PRIORITY_LAST, 0, 1);
+			      /* APPLE LOCAL isysroot 5083137 */
+			      SYSROOT_PRIORITY, 0, 1);
     }
 
   /* Process any user specified specs in the order given on the command
@@ -6740,7 +6681,7 @@ main (int argc, const char **argv)
 
   for (i = 0; (int) i < n_switches; i++)
     if (! switches[i].validated)
-      error ("unrecognized option `-%s'", switches[i].part1);
+      error ("unrecognized option '-%s'", switches[i].part1);
 
   /* Obey some of the options.  */
 
@@ -6821,6 +6762,7 @@ main (int argc, const char **argv)
       int n;
       const char *thrmod;
 
+      notice ("Target: %s\n", spec_machine);
       notice ("Configured with: %s\n", configuration_arguments);
 
 #ifdef THREAD_MODEL_SPEC
@@ -6869,8 +6811,6 @@ main (int argc, const char **argv)
 
   explicit_link_files = xcalloc (1, n_infiles);
 
-/* APPLE LOCAL begin IMI */
-
   if (combine_flag)
     combine_inputs = true;
   else
@@ -6882,10 +6822,10 @@ main (int argc, const char **argv)
       struct compiler *compiler = lookup_compiler (name, 
 						   strlen (name), 
 						   infiles[i].language);
-
+      
       if (compiler && !(compiler->combinable))
 	combine_inputs = false;
-
+      
       if (lang_n_infiles > 0 && compiler != input_file_compiler
 	  && infiles[i].language && infiles[i].language[0] != '*')
 	infiles[i].incompiler = compiler;
@@ -6902,19 +6842,20 @@ main (int argc, const char **argv)
 	  explicit_link_files[i] = 1;
 	  infiles[i].incompiler = NULL;
 	}
-      infiles[i].compiled = FALSE;
-      infiles[i].preprocessed = FALSE;
+      infiles[i].compiled = false;
+      infiles[i].preprocessed = false;
     }
 
+  /* APPLE LOCAL begin IMA */
   if (combine_flag
       && (save_temps_flag || traditional_cpp_flag || capital_e_flag))
     {
       bool save_combine_inputs = combine_inputs;
       /* Must do a separate pre-processing pass for C & Objective-C files, to
-	 obtain individual .i files. */
-      
+	 obtain individual .i files.  */
+
       combine_inputs = false;
-      for (i=0; (int) i < n_infiles; i++)
+      for (i = 0; (int) i < n_infiles; i++)
 	{
 	  int this_file_error = 0;
 	  
@@ -6925,7 +6866,7 @@ main (int argc, const char **argv)
 	    input_file_compiler = infiles[i].incompiler;
 	  else
 	    continue;
-	  
+
 	  if (input_file_compiler)
 	    {
 	      if (input_file_compiler->spec[0] == '#')
@@ -6939,7 +6880,7 @@ main (int argc, const char **argv)
 		  value = do_spec (input_file_compiler->spec);
 		  infiles[i].preprocessed = true;
 		  if (!have_o_argbuf_index)
-		    fatal ("spec `%s' is invalid", input_file_compiler->spec);
+		    fatal ("spec '%s' is invalid", input_file_compiler->spec);
 		  infiles[i].name = argbuf[have_o_argbuf_index];
 		  infiles[i].incompiler
 		    = lookup_compiler (infiles[i].name,
@@ -6976,7 +6917,6 @@ main (int argc, const char **argv)
 
 	  if (value < 0)
 	    this_file_error = 1;
-      
   
 	  if (this_file_error)
 	    {
@@ -6988,7 +6928,7 @@ main (int argc, const char **argv)
 	}
       combine_inputs = save_combine_inputs;
     }
-/* APPLE LOCAL end IMI */
+  /* APPLE LOCAL end IMA */
 
   for (i = 0; (int) i < n_infiles; i++)
     {
@@ -7036,7 +6976,7 @@ main (int argc, const char **argv)
 	  /* APPLE LOCAL end IMA */
 	    {
 	      value = do_spec (input_file_compiler->spec);
-	      infiles[i].compiled = true; 
+	      infiles[i].compiled = true;
 	      if (value < 0)
 		this_file_error = 1;
 	    }
@@ -7060,11 +7000,24 @@ main (int argc, const char **argv)
       clear_failure_queue ();
     }
 
-  /* Reset the output file name to the first input file name, for use
-     with %b in LINK_SPEC on a target that prefers not to emit a.out
-     by default.  */
+  /* APPLE LOCAL begin mainline */
+  /* Reset the input file name to the first compile/object file name, for use
+     with %b in LINK_SPEC. We use the first input file that we can find
+     a compiler to compile it instead of using infiles.language since for
+     languages other than C we use aliases that we then lookup later.  */
   if (n_infiles > 0)
-    set_input (infiles[0].name);
+    {
+      int i;
+
+      for (i = 0; i < n_infiles ; i++)
+	/* APPLE LOCAL suffix 5226662 */
+	if (infiles[i].language == 0 || infiles[i].language[0] != '*')
+	  {
+	    set_input (infiles[i].name);
+	    break;
+	  }
+    }
+  /* APPLE LOCAL end mainline */
 
   if (error_count == 0)
     {
@@ -7101,8 +7054,7 @@ main (int argc, const char **argv)
 
       value = do_spec (link_command_spec);
       if (value < 0)
-     error_count = 1;
-
+	error_count = 1;
       linker_was_run = (tmp != execution_count);
     }
 
@@ -7276,40 +7228,46 @@ fancy_abort (const char *file, int line, const char *func)
 /* Output an error message and exit.  */
 
 void
-fatal (const char *msgid, ...)
+fatal (const char *cmsgid, ...)
 {
   va_list ap;
 
-  va_start (ap, msgid);
+  va_start (ap, cmsgid);
 
   fprintf (stderr, "%s: ", programname);
-  vfprintf (stderr, _(msgid), ap);
+  vfprintf (stderr, _(cmsgid), ap);
   va_end (ap);
   fprintf (stderr, "\n");
   delete_temp_files ();
   exit (1);
 }
 
+/* The argument is actually c-format, not gcc-internal-format,
+   but because functions with identical names are used through
+   the rest of the compiler with gcc-internal-format, we just
+   need to hope all users of these functions use the common
+   subset between c-format and gcc-internal-format.  */
+
 void
-error (const char *msgid, ...)
+error (const char *gmsgid, ...)
 {
   va_list ap;
 
-  va_start (ap, msgid);
+  va_start (ap, gmsgid);
   fprintf (stderr, "%s: ", programname);
-  vfprintf (stderr, _(msgid), ap);
+  vfprintf (stderr, _(gmsgid), ap);
   va_end (ap);
 
   fprintf (stderr, "\n");
 }
 
 static void
-notice (const char *msgid, ...)
+notice (const char *cmsgid, ...)
 {
   va_list ap;
 
-  va_start (ap, msgid);
-  vfprintf (stderr, _(msgid), ap);
+  va_start (ap, cmsgid);
+  vfprintf (stderr, _(cmsgid), ap);
   va_end (ap);
 }
 
@@ -7362,7 +7320,9 @@ next_member:
     p++;
 
   SKIP_WHITE ();
-  if (*p == '.')
+/* APPLE LOCAL begin mainline 2007-03-13 5040758 */ \
+  if (*p == '.' || *p == ',')
+/* APPLE LOCAL end mainline 2007-03-13 5040758 */ \
     suffix = true, p++;
 
   atom = p;
@@ -7464,7 +7424,7 @@ used_arg (const char *p, int len)
 	      if (*q == '\0')
 		{
 		invalid_matches:
-		  fatal ("multilib spec `%s' is invalid", multilib_matches);
+		  fatal ("multilib spec '%s' is invalid", multilib_matches);
 		}
 	      q++;
 	    }
@@ -7656,7 +7616,7 @@ set_multilib_dir (void)
 	  if (*p == '\0')
 	    {
 	    invalid_exclusions:
-	      fatal ("multilib exclusions `%s' is invalid",
+	      fatal ("multilib exclusions '%s' is invalid",
 		     multilib_exclusions);
 	    }
 
@@ -7714,7 +7674,7 @@ set_multilib_dir (void)
 	  if (*p == '\0')
 	    {
 	    invalid_select:
-	      fatal ("multilib select `%s' is invalid",
+	      fatal ("multilib select '%s' is invalid",
 		     multilib_select);
 	    }
 	  ++p;
@@ -7855,7 +7815,7 @@ print_multilib_info (void)
 	  if (*p == '\0')
 	    {
 	    invalid_select:
-	      fatal ("multilib select `%s' is invalid", multilib_select);
+	      fatal ("multilib select '%s' is invalid", multilib_select);
 	    }
 	  
 	  ++p;
@@ -7893,7 +7853,7 @@ print_multilib_info (void)
 		if (*e == '\0')
 		  {
 		  invalid_exclusion:
-		    fatal ("multilib exclusion `%s' is invalid",
+		    fatal ("multilib exclusion '%s' is invalid",
 			   multilib_exclusions);
 		  }
 
@@ -8117,9 +8077,12 @@ if_exists_else_spec_function (int argc, const char **argv)
 }
 
 /* replace-outfile built-in spec function.
-   This looks for the first argument in the outfiles array's name and replaces it
-   with the second argument.  */
+   APPLE LOCAL begin mainline 2005-09-01 3449986
 
+   This looks for the first argument in the outfiles array's name and
+   replaces it with the second argument.  */
+
+/* APPLE LOCAL end mainline 2005-09-01 3449986 */
 static const char *
 replace_outfile_spec_function (int argc, const char **argv)
 {
@@ -8136,3 +8099,170 @@ replace_outfile_spec_function (int argc, const char **argv)
   return NULL;
 }
 
+/* APPLE LOCAL begin mainline 2005-09-01 3449986 */
+/* Given two version numbers, compares the two numbers.  
+   A version number must match the regular expression
+   ([1-9][0-9]*|0)(\.([1-9][0-9]*|0))*
+*/
+static int
+compare_version_strings (const char *v1, const char *v2)
+{
+  int rresult;
+  regex_t r;
+  
+  if (regcomp (&r, "^([1-9][0-9]*|0)(\\.([1-9][0-9]*|0))*$",
+	       REG_EXTENDED | REG_NOSUB) != 0)
+    abort ();
+  rresult = regexec (&r, v1, 0, NULL, 0);
+  if (rresult == REG_NOMATCH)
+    fatal ("invalid version number `%s'", v1);
+  else if (rresult != 0)
+    abort ();
+  rresult = regexec (&r, v2, 0, NULL, 0);
+  if (rresult == REG_NOMATCH)
+    fatal ("invalid version number `%s'", v2);
+  else if (rresult != 0)
+    abort ();
+
+  return strverscmp (v1, v2);
+}
+
+
+/* version_compare built-in spec function.
+
+   This takes an argument of the following form:
+
+   <comparison-op> <arg1> [<arg2>] <switch> <result>
+
+   and produces "result" if the comparison evaluates to true,
+   and nothing if it doesn't.
+
+   The supported <comparison-op> values are:
+   
+   >=  true if switch is a later (or same) version than arg1
+   !>  opposite of >=
+   <   true if switch is an earlier version than arg1
+   !<  opposite of <
+   ><  true if switch is arg1 or later, and earlier than arg2
+   <>  true if switch is earlier than arg1 or is arg2 or later
+
+   If the switch is not present, the condition is false unless
+   the first character of the <comparison-op> is '!'.
+
+   For example,
+   %:version-compare(>= 10.3 mmacosx-version-min= -lmx)
+   adds -lmx if -mmacosx-version-min=10.3.9 was passed.  */
+
+static const char *
+version_compare_spec_function (int argc, const char **argv)
+{
+  int comp1, comp2;
+  size_t switch_len;
+  const char *switch_value = NULL;
+  int nargs = 1, i;
+  bool result;
+
+  if (argc < 3)
+    abort ();
+  if (argv[0][0] == '\0')
+    abort ();
+  if ((argv[0][1] == '<' || argv[0][1] == '>') && argv[0][0] != '!')
+    nargs = 2;
+  if (argc != nargs + 3)
+    abort ();
+
+  switch_len = strlen (argv[nargs + 1]);
+  for (i = 0; i < n_switches; i++)
+    if (!strncmp (switches[i].part1, argv[nargs + 1], switch_len)
+	&& check_live_switch (i, switch_len))
+      switch_value = switches[i].part1 + switch_len;
+
+  if (switch_value == NULL)
+    comp1 = comp2 = -1;
+  else
+    {
+      comp1 = compare_version_strings (switch_value, argv[1]);
+      if (nargs == 2)
+	comp2 = compare_version_strings (switch_value, argv[2]);
+      else
+	comp2 = -1;  /* This value unused.  */
+    }
+
+  switch (argv[0][0] << 8 | argv[0][1])
+    {
+    case '>' << 8 | '=':
+      result = comp1 >= 0;
+      break;
+    case '!' << 8 | '<':
+      result = comp1 >= 0 || switch_value == NULL;
+      break;
+    case '<' << 8:
+      result = comp1 < 0;
+      break;
+    case '!' << 8 | '>':
+      result = comp1 < 0 || switch_value == NULL;
+      break;
+    case '>' << 8 | '<':
+      result = comp1 >= 0 && comp2 < 0;
+      break;
+    case '<' << 8 | '>':
+      result = comp1 < 0 || comp2 >= 0;
+      break;
+      
+    default:
+      abort ();
+    }
+  if (! result)
+    return NULL;
+
+  /* APPLE LOCAL begin version-compare quoting 5378841 */
+  {
+    /* Escape all spec special characters.  */
+    const char *p = argv[nargs + 2];
+    char *q, *b;
+    while (*p)
+      {
+	if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '%' || *p == '\\')
+	  break;
+	++p;
+      }
+
+    if (*p == 0)
+      return argv[nargs + 2];
+
+    q = b = xmalloc (strlen (p)*2 + 1);
+    p = argv[nargs + 2];
+    while (*p)
+      {
+	if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '%' || *p == '\\')
+	  *q++ = '\\';
+	*q++ = *p++;
+      }
+    *q = *p;
+    return b;
+  }
+  /* APPLE LOCAL end version-compare quoting 5378841 */
+}
+/* APPLE LOCAL end mainline 2005-09-01 3449986 */
+
+/* APPLE LOCAL begin ARM 4256246 */
+/* If target_system_root is set, pass it using the specified option.  */
+static const char *
+add_sysroot_spec_function (int argc, const char **argv)
+{
+  if (argc != 1)
+    abort();
+
+  if (target_system_root != 0)
+    {
+      char *result;
+
+      result = xmalloc (strlen (argv[0]) + 1
+			+ strlen (target_system_root) + 1);
+      sprintf (result, "%s %s", argv[0], target_system_root);
+      return result;
+    }
+
+  return "";
+}
+/* APPLE LOCAL end ARM 4256246 */

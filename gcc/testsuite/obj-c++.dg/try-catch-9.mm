@@ -1,4 +1,4 @@
-/* APPLE LOCAL file Objective-C */
+/* APPLE LOCAL file mainline */
 /* Check that local variables that get modified inside the @try
    block survive until the @catch block is reached.  */
 /* Developed by Ziemowit Laski <zlaski@apple.com>.  */
@@ -6,7 +6,8 @@
 /* { dg-options "-fobjc-exceptions -O2" } */
 /* { dg-do run } */
 
-#include <objc/Object.h>
+/* APPLE LOCAL radar 4894756 */
+#include "../objc/execute/Object2.h"
 #include <stdlib.h>
 #include <stdio.h>
 

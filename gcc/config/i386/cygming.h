@@ -36,14 +36,16 @@ Boston, MA 02111-1307, USA.  */
 /* Use section relative relocations for debugging offsets.  Unlike
    other targets that fake this by putting the section VMA at 0, PE
    won't allow it.  */
-#define ASM_OUTPUT_DWARF_OFFSET(FILE, SIZE, LABEL)    \
-  do {                                                \
-    if (SIZE != 4)                                    \
-      abort ();                                       \
-                                                      \
-    fputs ("\t.secrel32\t", FILE);                    \
-    assemble_name (FILE, LABEL);                      \
+/* APPLE LOCAL begin mainline 2006-03-16 dwarf 4383509 */
+#define ASM_OUTPUT_DWARF_OFFSET(FILE, SIZE, LABEL, SECTION)	\
+  do {								\
+    if (SIZE != 4)						\
+      abort ();							\
+								\
+    fputs ("\t.secrel32\t", FILE);				\
+    assemble_name (FILE, LABEL);				\
   } while (0)
+/* APPLE LOCAL end mainline 2006-03-16 dwarf 4383509 */
 #endif
 
 #define TARGET_EXECUTABLE_SUFFIX ".exe"
@@ -395,6 +397,23 @@ extern int i386_pe_dllimport_name_p (const char *);
 				       TREE_PUBLIC (DECL));		\
       ASM_OUTPUT_DEF (STREAM, alias, IDENTIFIER_POINTER (TARGET));	\
     } while (0)
+
+/* GNU as supports weak symbols on PECOFF. */
+#ifdef HAVE_GAS_WEAK
+#define ASM_WEAKEN_LABEL(FILE, NAME)  \
+  do                                  \
+    {                                 \
+      fputs ("\t.weak\t", (FILE));    \
+      assemble_name ((FILE), (NAME)); \
+      fputc ('\n', (FILE));           \
+    }                                 \
+  while (0)
+#endif /* HAVE_GAS_WEAK */
+
+/* FIXME: SUPPORTS_WEAK && TARGET_HAVE_NAMED_SECTIONS is true,
+   but for .jcr section to work we also need crtbegin and crtend
+   objects.  */
+#define TARGET_USE_JCR_SECTION 0
 
 /* Decide whether it is safe to use a local alias for a virtual function
    when constructing thunks.  */

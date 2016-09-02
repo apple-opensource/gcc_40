@@ -1,4 +1,6 @@
 // { dg-do link  }
+// APPLE LOCAL mainline
+// { dg-options "-Wconversion" }
 
 #include <cstddef>
 
@@ -38,7 +40,7 @@ int main()
   z = NULL;  // { dg-warning "" } converting NULL to non-pointer type
   k(NULL);   // { dg-warning "" } converting NULL to int
   g(NULL);   // { dg-warning "" } converting NULL to int
-  h<NULL>(); // { dg-warning "" } NULL bound to integer template parameter
+  h<NULL>(); // No warning: NULL bound to integer template parameter
   l(NULL);   // { dg-warning "" } converting NULL to int
   NULL && NULL; // No warning: converting NULL to bool is OK
 }

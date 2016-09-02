@@ -1,9 +1,11 @@
+/* APPLE LOCAL file mainline */
 /* Test if the compiler accepts @throw / @try..@catch..@finally syntax.  */
 /* Developed by Ziemowit Laski <zlaski@apple.com>.  */
 /* { dg-options "-fobjc-exceptions" } */
 /* { dg-do compile } */
 
-#include <objc/Object.h>
+/* APPLE LOCAL radar 4894756 */
+#include "../objc/execute/Object2.h"
 #include <stdio.h>
 #include <setjmp.h>
 

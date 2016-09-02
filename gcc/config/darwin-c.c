@@ -34,17 +34,28 @@ Boston, MA 02111-1307, USA.  */
 #include "prefix.h"
 /* APPLE LOCAL include options.h */
 #include "options.h"
+/* APPLE LOCAL begin optimization pragmas 3124235/3420242 */
+#include "flags.h"
+#include "opts.h"
+#include "varray.h"
+/* APPLE LOCAL end optimization pragmas 3124235/3420242 */
 
 /* Pragmas.  */
 
-#define BAD(msgid) do { warning (msgid); return; } while (0)
+#define BAD(gmsgid) do { warning (gmsgid); return; } while (0)
 /* APPLE LOCAL Macintosh alignment 2002-1-22 --ff */
 #define BAD2(msgid, arg) do { warning (msgid, arg); return; } while (0)
 
 static bool using_frameworks = false;
 
-/* APPLE LOCAL CALL_ON_LOAD/CALL_ON_UNLOAD pragmas  20020202 --turly  */
+/* APPLE LOCAL begin mainline */
+/* True if we're setting __attribute__ ((ms_struct)).  */
+static bool darwin_ms_struct = false;
+
+/* APPLE LOCAL end mainline */
+/* APPLE LOCAL begin CALL_ON_LOAD/CALL_ON_UNLOAD pragmas  20020202 --turly  */
 static void directive_with_named_function (const char *, void (*sec_f)(void));
+/* APPLE LOCAL end CALL_ON_LOAD/CALL_ON_UNLOAD pragmas  20020202 --turly  */
 
 /* Maintain a small stack of alignments.  This is similar to pragma
    pack's stack, but simpler.  */
@@ -54,7 +65,9 @@ static void push_field_alignment (int, int, int);
 /* APPLE LOCAL end Macintosh alignment 2001-12-17 --ff */
 static void pop_field_alignment (void);
 static const char *find_subframework_file (const char *, const char *);
-static void add_system_framework_path (char *);
+/* APPLE LOCAL begin iframework for 4.3 4094959 */
+/* Remove add_system_framework_path */
+/* APPLE LOCAL end iframework for 4.3 4094959 */
 static const char *find_subframework_header (cpp_reader *pfile, const char *header,
 					     cpp_dir **dirp);
 
@@ -85,6 +98,12 @@ typedef struct align_stack
 static struct align_stack * field_align_stack = NULL;
 
 /* APPLE LOCAL begin Macintosh alignment 2001-12-17 --ff */
+/* APPLE LOCAL begin radar 4679943 */
+/* natural_alignment == 0 means "off"
+   natural_alignment == 1 means "on"
+   natural_alignment == 2 means "unchanged"  */
+/* APPLE LOCAL end radar 4679943 */
+
 static void
 push_field_alignment (int bit_alignment, 
 		      int mac68k_alignment, int natural_alignment)
@@ -102,10 +121,13 @@ push_field_alignment (int bit_alignment,
     rs6000_alignment_flags |= MASK_ALIGN_MAC68K;
   else
     rs6000_alignment_flags &= ~MASK_ALIGN_MAC68K;
-  if (natural_alignment)
+
+  /* APPLE LOCAL begin radar 4679943 */
+  if (natural_alignment == 1)
     rs6000_alignment_flags |= MASK_ALIGN_NATURAL;
-  else
+  else if (natural_alignment == 0)
     rs6000_alignment_flags &= ~MASK_ALIGN_NATURAL;
+  /* APPLE LOCAL end radar 4679943 */
 }
 /* APPLE LOCAL end Macintosh alignment 2001-12-17 --ff */
 
@@ -197,12 +219,14 @@ darwin_pragma_options (cpp_reader *pfile ATTRIBUTE_UNUSED)
     pop_field_alignment ();
   else
     warning ("malformed '#pragma options align={mac68k|power|natural|reset}', ignoring");
-/* APPLE LOCAL end Macintosh alignment 2002-1-22 --ff */
 }
+/* APPLE LOCAL end Macintosh alignment 2002-1-22 --ff */
 
 /* APPLE LOCAL begin Macintosh alignment 2002-1-22 --ff */
 /* #pragma pack ()
    #pragma pack (N)  
+   #pragma pack (pop[,id])
+   #pragma pack (push[,id],N)
    
    We have a problem handling the semantics of these directives since,
    to play well with the Macintosh alignment directives, we want the
@@ -212,17 +236,18 @@ darwin_pragma_options (cpp_reader *pfile ATTRIBUTE_UNUSED)
 void
 darwin_pragma_pack (cpp_reader *pfile ATTRIBUTE_UNUSED)
 {
-  tree x;
+  tree x, id = 0;
   int align = -1;
   enum cpp_ttype token;
   enum { set, push, pop } action;
 
   if (c_lex (&x) != CPP_OPEN_PAREN)
     BAD ("missing '(' after '#pragma pack' - ignored");
+
   token = c_lex (&x);
   if (token == CPP_CLOSE_PAREN)
     {
-      action = pop;  		/* or "set" ???  */    
+      action = pop;
       align = 0;
     }
   else if (token == CPP_NUMBER)
@@ -232,31 +257,83 @@ darwin_pragma_pack (cpp_reader *pfile ATTRIBUTE_UNUSED)
       if (c_lex (&x) != CPP_CLOSE_PAREN)
 	BAD ("malformed '#pragma pack' - ignored");
     }
-  else
-    BAD ("malformed '#pragma pack' - ignored");
+  else if (token == CPP_NAME)
+    {
+#define GCC_BAD_ACTION do { if (action == push) \
+	  BAD ("malformed '#pragma pack(push[, id], <n>)' - ignored"); \
+	else \
+	  BAD ("malformed '#pragma pack(pop[, id])' - ignored"); \
+	} while (0)
+
+      const char *op = IDENTIFIER_POINTER (x);
+      if (!strcmp (op, "push"))
+	action = push;
+      else if (!strcmp (op, "pop"))
+	action = pop;
+      else
+	BAD2 ("unknown action '%s' for '#pragma pack' - ignored", op);
+
+      token = c_lex (&x);
+      if (token != CPP_COMMA && action == push)
+	GCC_BAD_ACTION;
+
+      if (token == CPP_COMMA)
+	{
+	  token = c_lex (&x);
+	  if (token == CPP_NAME)
+	    {
+	      id = x;
+	      if (action == push && c_lex (&x) != CPP_COMMA)
+		GCC_BAD_ACTION;
+	      token = c_lex (&x);
+	    }
+
+	  if (action == push)
+	    {
+	      if (token == CPP_NUMBER)
+		{
+		  align = TREE_INT_CST_LOW (x);
+		  token = c_lex (&x);
+		}
+	      else
+		GCC_BAD_ACTION;
+	    }
+	}
+
+      if (token != CPP_CLOSE_PAREN)
+	GCC_BAD_ACTION;
+#undef GCC_BAD_ACTION
+    }
+else
+  BAD ("malformed '#pragma pack' - ignored");
 
   if (c_lex (&x) != CPP_EOF)
     warning ("junk at end of '#pragma pack'");
     
-  switch (align)
+  if (action != pop)
     {
-    case 0:
-    case 1:
-    case 2:
-    case 4:
-    case 8:
-    case 16:
-      align *= BITS_PER_UNIT;
-      break;
-    default:
-      BAD2 ("alignment must be a small power of two, not %d", align);
+      switch (align)
+	{
+	  case 0:
+	  case 1:
+	  case 2:
+	  case 4:
+	  case 8:
+	  case 16:
+	    align *= BITS_PER_UNIT;
+	    break;
+	  default:
+	    BAD2 ("alignment must be a small power of two, not %d", align);
+	}
     }
   
   switch (action)
     {
     case pop:   pop_field_alignment ();		      break;
-    case push:  push_field_alignment (align, 0, 0);   break;
-    case set:   				      break;
+    /* APPLE LOCAL begin radar 4679943 */
+    case push:  push_field_alignment (align, 0, 2);   break;
+    /* APPLE LOCAL end radar 4679943 */
+    case set:                                         break;
     }
 }
 /* APPLE LOCAL end Macintosh alignment 2002-1-22 --ff */
@@ -277,7 +354,8 @@ darwin_pragma_unused (cpp_reader *pfile ATTRIBUTE_UNUSED)
       tok = c_lex (&decl);
       if (tok == CPP_NAME && decl)
 	{
-	  tree local = lookup_name (decl);
+	  /* APPLE LOCAL mainline lookup_name 4125055 */
+	  tree local = lookup_name_two (decl, 0);
 	  if (local && (TREE_CODE (local) == PARM_DECL
 			|| TREE_CODE (local) == VAR_DECL))
 	    TREE_USED (local) = 1;
@@ -293,6 +371,196 @@ darwin_pragma_unused (cpp_reader *pfile ATTRIBUTE_UNUSED)
   if (c_lex (&x) != CPP_EOF)
     warning ("junk at end of '#pragma unused'");
 }
+
+/* APPLE LOCAL begin mainline */
+/* Parse the ms_struct pragma.  */
+void
+darwin_pragma_ms_struct (cpp_reader *pfile ATTRIBUTE_UNUSED)
+{
+  const char *arg;
+  tree t;
+
+  if (c_lex (&t) != CPP_NAME)
+    BAD ("malformed '#pragma ms_struct', ignoring");
+  arg = IDENTIFIER_POINTER (t);
+
+  if (!strcmp (arg, "on"))
+    darwin_ms_struct = true;
+  else if (!strcmp (arg, "off") || !strcmp (arg, "reset"))
+    darwin_ms_struct = false;
+  else
+    warning ("malformed '#pragma ms_struct {on|off|reset}', ignoring");
+
+  if (c_lex (&t) != CPP_EOF)
+    warning ("junk at end of '#pragma ms_struct'");
+}
+
+/* Set darwin specific type attributes on TYPE.  */
+void
+darwin_set_default_type_attributes (tree type)
+{
+  /* Handle the ms_struct pragma.  */
+  if (darwin_ms_struct
+      && TREE_CODE (type) == RECORD_TYPE)
+    TYPE_ATTRIBUTES (type) = tree_cons (get_identifier ("ms_struct"),
+                                        NULL_TREE,
+                                        TYPE_ATTRIBUTES (type));
+}
+/* APPLE LOCAL end mainline */
+/* APPLE LOCAL begin pragma reverse_bitfields */
+/* Handle the reverse_bitfields pragma.  */
+
+void
+darwin_pragma_reverse_bitfields (cpp_reader *pfile ATTRIBUTE_UNUSED)
+{
+  const char* arg;
+  tree t;
+
+  if (c_lex (&t) != CPP_NAME)
+    BAD ("malformed '#pragma reverse_bitfields', ignoring");
+  arg = IDENTIFIER_POINTER (t);
+
+  if (!strcmp (arg, "on"))
+    darwin_reverse_bitfields = true;
+  else if (!strcmp (arg, "off") || !strcmp (arg, "reset"))
+    darwin_reverse_bitfields = false;
+  else
+    warning ("malformed '#pragma reverse_bitfields {on|off|reset}', ignoring");
+  if (c_lex (&t) != CPP_EOF)
+    warning ("junk at end of '#pragma reverse_bitfields'");
+}
+/* APPLE LOCAL end pragma reverse_bitfields */
+
+/* APPLE LOCAL begin optimization pragmas 3124235/3420242 */
+varray_type va_opt;
+
+static void
+push_opt_level (int level, int size)
+{
+  if (!va_opt)
+    VARRAY_INT_INIT (va_opt, 5, "va_opt");
+  VARRAY_PUSH_INT (va_opt, size << 16 | level);
+}
+
+static void
+pop_opt_level (void)
+{
+  int level;
+  if (!va_opt)
+    VARRAY_INT_INIT (va_opt, 5, "va_opt");
+  if (!VARRAY_ACTIVE_SIZE (va_opt))
+    {
+      warning ("optimization pragma stack underflow");
+      return;
+    }
+  level = VARRAY_TOP_INT (va_opt);
+  VARRAY_POP (va_opt);
+
+  optimize_size = level >> 16;
+  optimize = level & 0xffff;
+}
+
+/* APPLE LOCAL begin 4760857 optimization pragmas */
+/* Set the global flags as required by #pragma optimization_level or
+   #pragma optimize_size.  */
+
+static void darwin_set_flags_from_pragma (void)
+{
+  set_flags_from_O (false);
+
+  /* Enable new loop optimizer pass if any of its optimizations is called.  */
+  if (flag_move_loop_invariants
+      || flag_unswitch_loops
+      || flag_peel_loops
+      || flag_unroll_loops
+      || flag_branch_on_count_reg)
+    flag_loop_optimize2 = 1;
+
+  /* This is expected to be defined in each target.   Should contain
+     any snippets from OPTIMIZATION_OPTIONS and OVERRIDE_OPTIONS that
+     set per-func flags on the basis of -O level. */
+  reset_optimization_options (optimize, optimize_size);
+
+  if (align_loops <= 0) align_loops = 1;
+  if (align_loops_max_skip > align_loops || !align_loops)
+    align_loops_max_skip = align_loops - 1;
+  if (align_jumps <= 0) align_jumps = 1;
+  if (align_jumps_max_skip > align_jumps || !align_jumps)
+    align_jumps_max_skip = align_jumps - 1;
+  if (align_labels <= 0) align_labels = 1;
+}
+/* APPLE LOCAL end 4760857 optimization pragmas */
+
+void
+darwin_pragma_opt_level  (cpp_reader *pfile ATTRIBUTE_UNUSED)
+{
+  tree t;
+  enum cpp_ttype argtype = c_lex (&t);
+
+  if (argtype == CPP_NAME)
+    {
+      const char* arg = IDENTIFIER_POINTER (t);
+      if (strcmp (arg, "reset") != 0)
+	BAD ("malformed '#pragma optimization_level [GCC] {0|1|2|3|reset}', ignoring");
+      pop_opt_level ();
+    }
+  else if (argtype == CPP_NUMBER)
+    {
+      if (TREE_CODE (t) != INTEGER_CST
+	  || INT_CST_LT (t, integer_zero_node)
+	  || TREE_INT_CST_HIGH (t) != 0)
+	BAD ("malformed '#pragma optimization_level [GCC] {0|1|2|3|reset}', ignoring");
+
+      push_opt_level (optimize, optimize_size);
+      optimize = TREE_INT_CST_LOW (t);
+      if (optimize > 3)
+	optimize = 3;
+      optimize_size = 0;
+    }
+  else
+    BAD ("malformed '#pragma optimization_level [GCC] {0|1|2|3|reset}', ignoring");
+
+  /* APPLE LOCAL begin 4760857 optimization pragmas */
+  darwin_set_flags_from_pragma ();
+  /* APPLE LOCAL end 4760857 optimization pragmas */
+
+  if (c_lex (&t) != CPP_EOF)
+    warning ("junk at end of '#pragma optimization_level'");
+}
+
+void
+darwin_pragma_opt_size  (cpp_reader *pfile ATTRIBUTE_UNUSED)
+{
+  const char* arg;
+  tree t;
+
+  if (c_lex (&t) != CPP_NAME)
+    BAD ("malformed '#pragma optimize_for_size { on | off | reset}', ignoring");
+  arg = IDENTIFIER_POINTER (t);
+
+  if (!strcmp (arg, "on"))
+    {
+      push_opt_level (optimize, optimize_size);
+      optimize_size = 1;
+      optimize = 2;
+    }
+  else if (!strcmp (arg, "off"))
+    /* Not clear what this should do exactly.  CW does not do a pop so
+       we don't either.  */
+    optimize_size = 0;
+  else if (!strcmp (arg, "reset"))
+    pop_opt_level ();
+  else
+    BAD ("malformed '#pragma optimize_for_size { on | off | reset }', ignoring");
+
+  /* APPLE LOCAL begin 4760857 optimization pragmas */
+  darwin_set_flags_from_pragma ();
+  /* APPLE LOCAL end 4760857 optimization pragmas */
+
+  if (c_lex (&t) != CPP_EOF)
+    warning ("junk at end of '#pragma optimize_for_size'");
+}
+/* APPLE LOCAL end optimization pragmas 3124235/3420242 */
 
 static struct {
   size_t len;
@@ -407,6 +675,28 @@ framework_construct_pathname (const char *fname, cpp_dir *dir)
   strncpy (&frname[frname_len], ".framework/", strlen (".framework/"));
   frname_len += strlen (".framework/");
 
+  /* APPLE LOCAL begin mainline */
+  if (fast_dir == 0)
+    {
+      frname[frname_len-1] = 0;
+      if (stat (frname, &st) == 0)
+	{
+	  /* As soon as we find the first instance of the framework,
+	     we stop and never use any later instance of that
+	     framework.  */
+	  add_framework (fname, fname_len, dir);
+	}
+      else
+	{
+	  /* If we can't find the parent directory, no point looking
+	     further.  */
+	  free (frname);
+	  return 0;
+	}
+      frname[frname_len-1] = '/';
+    }
+  /* APPLE LOCAL end mainline */
+
   /* Append framework_header_dirs and header file name */
   for (i = 0; framework_header_dirs[i].dirName; i++)
     {
@@ -417,11 +707,8 @@ framework_construct_pathname (const char *fname, cpp_dir *dir)
 	      &fname[fname_len]);
 
       if (stat (frname, &st) == 0)
-	{
-	  if (fast_dir == 0)
-	    add_framework (fname, fname_len, dir);
-	  return frname;
-	}
+	/* APPLE LOCAL mainline */
+	return frname;
     }
 
   free (frname);
@@ -604,9 +891,6 @@ darwin_register_objc_includes (const char *sysroot, const char *iprefix,
    the missing_header callback for subframework searching if any
    frameworks had been registered.  */
 
-/* APPLE LOCAL begin SDK 3886137 */ 
-/* Patch is waiting FSF review. Use sysroot value. */ 
-
 void
 darwin_register_frameworks (const char *sysroot,
 			    const char *iprefix ATTRIBUTE_UNUSED, int stdinc)
@@ -620,7 +904,7 @@ darwin_register_frameworks (const char *sysroot,
 	{
 	  char *str;
 	  if (sysroot)
-	    str = concat (sysroot, xstrdup (framework_defaults[i]), NULL);
+	    str = concat (sysroot, xstrdup (framework_defaults [i]), NULL);
 	  else
 	    str = xstrdup (framework_defaults[i]);
 	  /* System Framework headers are cxx aware.  */
@@ -631,7 +915,6 @@ darwin_register_frameworks (const char *sysroot,
   if (using_frameworks)
     cpp_get_callbacks (parse_in)->missing_header = find_subframework_header;
 }
-/* APPLE LOCAL end SDK 3886137 */ 
 
 /* Search for HEADER in context dependent way.  The return value is
    the malloced name of a header to try and open, if any, or NULL
@@ -697,13 +980,270 @@ static void directive_with_named_function (const char *pragma_name,
 void
 darwin_pragma_call_on_load (cpp_reader *pfile ATTRIBUTE_UNUSED)
 {
-  warning("Pragma CALL_ON_LOAD is deprecated; use constructor attribute instead");
-  directive_with_named_function ("CALL_ON_LOAD", mod_init_section);
+  if (TARGET_64BIT)
+    error ("Pragma CALL_ON_LOAD unsupported for 64-bit target; use constructor attribute instead");
+  else
+    {
+      warning ("Pragma CALL_ON_LOAD is deprecated; use constructor attribute instead");
+      directive_with_named_function ("CALL_ON_LOAD", mod_init_section);
+    }
 }
 void
 darwin_pragma_call_on_unload (cpp_reader *pfile ATTRIBUTE_UNUSED)
 {
-  warning("Pragma CALL_ON_UNLOAD is deprecated; use destructor attribute instead");
-  directive_with_named_function ("CALL_ON_UNLOAD", mod_term_section);
+  if (TARGET_64BIT)
+    error ("Pragma CALL_ON_UNLOAD unsupported for 64-bit target; use destructor attribute instead");
+  else
+    {
+      warning("Pragma CALL_ON_UNLOAD is deprecated; use destructor attribute instead");
+      directive_with_named_function ("CALL_ON_UNLOAD", mod_term_section);
+    }
 }
 /* APPLE LOCAL end CALL_ON_LOAD/CALL_ON_UNLOAD pragmas  20020202 --turly  */
+/* APPLE LOCAL begin mainline 2005-09-01 3449986 */
+
+
+/* Return the value of darwin_macosx_version_min suitable for the
+   __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ macro,
+   so '10.4.2' becomes 1042.  
+   Print a warning if the version number is not known.  */
+static const char *
+/* APPLE LOCAL ARM 5683689 */
+macosx_version_as_macro (void)
+{
+  static char result[] = "1000";
+  
+  if (strncmp (darwin_macosx_version_min, "10.", 3) != 0)
+    goto fail;
+  if (! ISDIGIT (darwin_macosx_version_min[3]))
+    goto fail;
+  result[2] = darwin_macosx_version_min[3];
+  if (darwin_macosx_version_min[4] != '\0')
+    {
+      if (darwin_macosx_version_min[4] != '.')
+	goto fail;
+      if (! ISDIGIT (darwin_macosx_version_min[5]))
+	goto fail;
+      if (darwin_macosx_version_min[6] != '\0')
+	goto fail;
+      result[3] = darwin_macosx_version_min[5];
+    }
+  else
+    result[3] = '0';
+  
+  return result;
+  
+ fail:
+  error ("Unknown value %qs of -mmacosx-version-min",
+	 darwin_macosx_version_min);
+  return "1000";
+}
+
+/* APPLE LOCAL begin ARM 5683689 */
+/* Return the value of darwin_iphoneos_version_min suitable for the
+   __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ macro.  Unlike the
+   __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ macros, minor version
+   numbers are left-zero-padded.  e.g., '1.2.3' becomes 10203.
+   The last/third version number (patch level?) is optional, and
+   defaults to '00' if not specified.  In the case of a parse error,
+   print a warning and return 10200.  */
+static const char *
+iphoneos_version_as_macro (void)
+{
+  static char result[sizeof ("99.99.99") + 1];
+  const char *src_ptr = darwin_iphoneos_version_min;
+  char *result_ptr = &result[0];
+
+  if (! darwin_iphoneos_version_min)
+    goto fail;
+
+  if (! ISDIGIT (*src_ptr))
+    goto fail;
+
+  /* Copy over the major version number.  */
+  *result_ptr++ = *src_ptr++;
+
+  if (ISDIGIT (*src_ptr))
+    *result_ptr++ = *src_ptr++;
+
+  if (*src_ptr != '.')
+    goto fail;
+
+  src_ptr++;
+
+  /* Start parsing the minor version number.  */
+  if (! ISDIGIT (*src_ptr))
+    goto fail;
+
+  /* Zero-pad a single-digit value, or copy a two-digit value.  */
+  *result_ptr++ = ISDIGIT (*(src_ptr + 1)) ? *src_ptr++ : '0';
+  *result_ptr++ = *src_ptr++;
+
+  /* Parse the third version number (patch level?)  */
+  if (*src_ptr == '\0')
+    {
+      /* Not present -- default to zeroes.  */
+      *result_ptr++ = '0';
+      *result_ptr++ = '0';
+    }
+  else if (*src_ptr == '.')
+    {
+      src_ptr++;
+
+      if (! ISDIGIT (*src_ptr))
+	goto fail;
+
+      /* Zero-pad a single-digit value, or copy a two-digit value.  */
+      *result_ptr++ = ISDIGIT (*(src_ptr + 1)) ? *src_ptr++ : '0';
+      *result_ptr++ = *src_ptr++;
+    }
+  else
+    goto fail;
+
+  /* Verify and copy the terminating NULL.  */
+  if (*src_ptr != '\0')
+    goto fail;
+ 
+  *result_ptr++ = '\0'; 
+  return result;
+  
+ fail:
+  error ("Unknown value %qs of -miphoneos-version-min",
+	 darwin_iphoneos_version_min);
+  return "10200";
+}
+/* APPLE LOCAL end ARM 5683689 */
+
+/* Define additional CPP flags for Darwin.   */
+
+#define builtin_define(TXT) cpp_define (pfile, TXT)
+
+void
+darwin_cpp_builtins (cpp_reader *pfile)
+{
+  builtin_define ("__MACH__");
+  builtin_define ("__APPLE__");
+
+  /* APPLE LOCAL Apple version */
+  /* Don't define __APPLE_CC__ here.  */
+
+/* APPLE LOCAL begin ARM 5683689 */
+  if (darwin_macosx_version_min)
+    builtin_define_with_value ("__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__",
+			       macosx_version_as_macro(), false);
+  else
+    builtin_define_with_value ("__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__",
+			       iphoneos_version_as_macro(), false);
+
+/* APPLE LOCAL end ARM 5683689 */
+  /* APPLE LOCAL begin constant cfstrings */
+  if (darwin_constant_cfstrings)
+    builtin_define ("__CONSTANT_CFSTRINGS__");
+  /* APPLE LOCAL end constant cfstrings */
+  /* APPLE LOCAL begin pascal strings */
+  if (darwin_pascal_strings)
+    {
+      builtin_define ("__PASCAL_STRINGS__");
+    }
+  /* APPLE LOCAL end pascal strings */
+  /* APPLE LOCAL begin ObjC GC */
+  if (flag_objc_gc)
+    {
+      builtin_define ("__strong=__attribute__((objc_gc(strong)))");
+      builtin_define ("__weak=__attribute__((objc_gc(weak)))");
+      builtin_define ("__OBJC_GC__");
+    }
+  else
+    {
+      builtin_define ("__strong=");
+      builtin_define ("__weak=");
+    }
+  /* APPLE LOCAL end ObjC GC */
+  /* APPLE LOCAL begin C* warnings to easy porting to new abi */
+  if (flag_objc_abi == 2)
+    builtin_define ("__OBJC2__");
+  /* APPLE LOCAL end C* warnings to easy porting to new abi */
+  /* APPLE LOCAL begin radar 5072864 */
+  if (flag_objc_zerocost_exceptions)
+    builtin_define ("OBJC_ZEROCOST_EXCEPTIONS");
+  /* APPLE LOCAL begin radar 4899595 */
+  if (flag_objc_new_property)
+    builtin_define ("OBJC_NEW_PROPERTIES");
+  /* APPLE LOCAL end radar 4899595 */
+  /* APPLE LOCAL end radar 5072864 */
+  /* APPLE LOCAL begin radar 4224728 */
+  if (flag_pic)
+    builtin_define ("__PIC__");
+  /* APPLE LOCAL end radar 4224728 */
+}
+/* APPLE LOCAL end mainline 2005-09-01 3449986 */
+
+/* APPLE LOCAL begin iframework for 4.3 4094959 */
+bool
+darwin_handle_c_option (size_t code, const char *arg, int value ATTRIBUTE_UNUSED)
+{
+  switch (code)
+    {
+    default:
+      /* Options with a flag are otherwise assumed to be handled.  */
+      if (cl_options[code].flag_var)
+	break;
+
+      /* Unrecognized options that we said we'd handle turn into
+	 errors if not listed here if they don't have a flag.  */
+      return false;
+
+    case OPT_iframework:
+      add_system_framework_path (xstrdup (arg));
+      break;
+    }
+  return true;
+}
+/* APPLE LOCAL end iframework for 4.3 4094959 */
+
+/* APPLE LOCAL begin radar 4985544 - radar 5096648 */
+/* This routine checks that FORMAT_NUM'th argument ARGUMENT has the 'CFStringRef' type. */
+bool
+objc_check_format_cfstring (tree argument,
+                            unsigned HOST_WIDE_INT format_num,
+                            bool *no_add_attrs)
+{
+  unsigned HOST_WIDE_INT i;
+  bool ok = true;
+  tree CFStringRef_decl;
+
+  for (i = 1; i != format_num; i++)
+    {
+      if (argument == 0)
+        break;
+       argument = TREE_CHAIN (argument);
+    }
+
+  CFStringRef_decl = lookup_name_two (get_identifier ("CFStringRef"), 0);
+  if (!CFStringRef_decl || TREE_CODE (CFStringRef_decl) != TYPE_DECL)
+    ok = false;
+  else
+    {
+      tree t1 = TREE_VALUE (argument);
+      tree t2 = TREE_TYPE (CFStringRef_decl);
+      if (t1 != t2)
+        ok = false;
+    }
+
+  if (!ok)
+    {
+      error ("format CFString argument not an 'CFStringRef' type");
+      *no_add_attrs = true;
+    }
+  return ok;
+}
+/* APPLE LOCAL end radar 4985544 - radar 5096648 */
+/* APPLE LOCAL begin radar 2996215 */
+/* Objc wrapper to call libcpp's conversion routine. */
+bool
+objc_cvt_utf8_utf16 (const unsigned char *inbuf, size_t length, 
+		     unsigned char **uniCharBuf, size_t *numUniChars)
+{
+  return cpp_utf8_utf16 (parse_in, inbuf, length, uniCharBuf, numUniChars);
+}
+/* APPLE LOCAL end radar 2996215 */

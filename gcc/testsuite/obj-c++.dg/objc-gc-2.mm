@@ -1,7 +1,7 @@
 /* APPLE LOCAL file ObjC GC */
 /* A compile-only test for insertion of write barriers. */
 /* Developed by Ziemowit Laski  <zlaski@apple.com>  */
-/* { dg-do compile } */
+/* { dg-do compile { target powerpc*-*-darwin* i?86*-*-darwin* } } */
 /* { dg-options "-fnext-runtime -fobjc-gc -Wassign-intercept" } */
 
 #include <objc/objc.h>
@@ -40,8 +40,8 @@ public:
 void inline_func(void) {
   QPixmap *pix;
 
-  pix->imageRenderer = 0; /* { dg-warning "strong\\-cast may possibly be needed" } */
-  pix->somePtr = 0; /* { dg-warning "strong\\-cast may possibly be needed" } */
+  pix->imageRenderer = 0; /* { dg-warning "strong\\-cast assignment" } */
+  pix->somePtr = 0; /* { dg-warning "strong\\-cast assignment" } */
   (__strong id)pix->somePtr = 0; /* { dg-warning "strong\\-cast assignment" } */
   (__strong id)pix->imageRenderer = 0; /* { dg-warning "strong\\-cast assignment" } */
 }
@@ -51,8 +51,8 @@ void QPixmap::resize(int w, int h)
     if (needCopyOnWrite) {
         id <WebCoreImageRenderer> newImageRenderer = [imageRenderer copyWithZone:0];
         [imageRenderer release];
-        imageRenderer = newImageRenderer; /* { dg-warning "strong\\-cast may possibly be needed" } */
-        somePtr = 0; /* { dg-warning "strong\\-cast may possibly be needed" } */
+        imageRenderer = newImageRenderer; /* { dg-warning "strong\\-cast assignment" } */
+        somePtr = 0; /* { dg-warning "strong\\-cast assignment" } */
         (__strong id)imageRenderer = newImageRenderer; /* { dg-warning "strong\\-cast assignment" } */
         needCopyOnWrite = false;
     }

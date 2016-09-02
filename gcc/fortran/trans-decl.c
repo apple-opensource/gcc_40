@@ -1,5 +1,5 @@
 /* Backend function setup
-   Copyright (C) 2002, 2003, 2004 Free Software Foundation, Inc.
+   Copyright (C) 2002, 2003, 2004, 2005 Free Software Foundation, Inc.
    Contributed by Paul Brook
 
 This file is part of GCC.
@@ -148,9 +148,9 @@ gfc_add_decl_to_function (tree decl)
 }
 
 
-/* Build a  backend label declaration.
-   Set TREE_USED for named lables.  For artificial labels it's up to the
-   caller to mark the label as used.  */
+/* Build a  backend label declaration.  Set TREE_USED for named labels.
+   The context of the label is always the current_function_decl.  All
+   labels are marked artificial.  */
 
 tree
 gfc_build_label_decl (tree label_id)
@@ -174,19 +174,13 @@ gfc_build_label_decl (tree label_id)
   DECL_CONTEXT (label_decl) = current_function_decl;
   DECL_MODE (label_decl) = VOIDmode;
 
-  if (label_name)
-    {
-      DECL_ARTIFICIAL (label_decl) = 1;
-    }
-  else
-    {
-      /* We always define the label as used, even if the original source
-         file never references the label.  We don't want all kinds of
-         spurious warnings for old-style Fortran code with too many
-         labels.  */
-      TREE_USED (label_decl) = 1;
-    }
+  /* We always define the label as used, even if the original source
+     file never references the label.  We don't want all kinds of
+     spurious warnings for old-style Fortran code with too many
+     labels.  */
+  TREE_USED (label_decl) = 1;
 
+  DECL_ARTIFICIAL (label_decl) = 1;
   return label_decl;
 }
 
@@ -278,7 +272,7 @@ gfc_sym_mangled_identifier (gfc_symbol * sym)
 {
   char name[GFC_MAX_MANGLED_SYMBOL_LEN + 1];
 
-  if (sym->module[0] == 0)
+  if (sym->module == NULL)
     return gfc_sym_identifier (sym);
   else
     {
@@ -296,8 +290,8 @@ gfc_sym_mangled_function_id (gfc_symbol * sym)
   int has_underscore;
   char name[GFC_MAX_MANGLED_SYMBOL_LEN + 1];
 
-  if (sym->module[0] == 0 || sym->attr.proc == PROC_EXTERNAL
-      || (sym->module[0] != 0 && sym->attr.if_source == IFSRC_IFBODY))
+  if (sym->module == NULL || sym->attr.proc == PROC_EXTERNAL
+      || (sym->module != NULL && sym->attr.if_source == IFSRC_IFBODY))
     {
       if (strcmp (sym->name, "MAIN__") == 0
 	  || sym->attr.proc == PROC_INTRINSIC)
@@ -320,6 +314,32 @@ gfc_sym_mangled_function_id (gfc_symbol * sym)
       snprintf (name, sizeof name, "__%s__%s", sym->module, sym->name);
       return get_identifier (name);
     }
+}
+
+
+/* Returns true if a variable of specified size should go on the stack.  */
+
+int
+gfc_can_put_var_on_stack (tree size)
+{
+  unsigned HOST_WIDE_INT low;
+
+  if (!INTEGER_CST_P (size))
+    return 0;
+
+  if (gfc_option.flag_max_stack_var_size < 0)
+    return 1;
+
+  if (TREE_INT_CST_HIGH (size) != 0)
+    return 0;
+
+  low = TREE_INT_CST_LOW (size);
+  if (low > (unsigned HOST_WIDE_INT) gfc_option.flag_max_stack_var_size)
+    return 0;
+
+/* TODO: Set a per-function stack size limit.  */
+
+  return 1;
 }
 
 
@@ -410,9 +430,9 @@ gfc_finish_var_decl (tree decl, gfc_symbol * sym)
       DECL_EXTERNAL (decl) = 1;
       TREE_PUBLIC (decl) = 1;
     }
-  else if (sym->module[0] && !sym->attr.result)
+  else if (sym->module && !sym->attr.result && !sym->attr.dummy)
     {
-      /* TODO: Don't set sym->module for result variables.  */
+      /* TODO: Don't set sym->module for result or dummy variables.  */
       gcc_assert (current_function_decl == NULL_TREE);
       /* This is the declaration of a module variable.  */
       TREE_PUBLIC (decl) = 1;
@@ -539,7 +559,7 @@ gfc_build_qualified_array (tree decl, gfc_symbol * sym)
 
 
 /* For some dummy arguments we don't use the actual argument directly.
-   Instead we create a local decl and use that.  This allows us to preform
+   Instead we create a local decl and use that.  This allows us to perform
    initialization, and construct full type information.  */
 
 static tree
@@ -716,6 +736,10 @@ gfc_get_symbol_decl (gfc_symbol * sym)
 	{
 	  sym->backend_decl =
 	    DECL_ARGUMENTS (sym->ns->proc_name->backend_decl);
+	  /* For entry master function skip over the __entry
+	     argument.  */
+	  if (sym->ns->proc_name->attr.entry_master)
+	    sym->backend_decl = TREE_CHAIN (sym->backend_decl);
 	}
 
       /* Dummy variables should already have been created.  */
@@ -772,7 +796,7 @@ gfc_get_symbol_decl (gfc_symbol * sym)
   /* Symbols from modules should have their assembler names mangled.
      This is done here rather than in gfc_finish_var_decl because it
      is different for string length variables.  */
-  if (sym->module[0])
+  if (sym->module)
     SET_DECL_ASSEMBLER_NAME (decl, gfc_sym_mangled_identifier (sym));
 
   if (sym->attr.dimension)
@@ -814,7 +838,7 @@ gfc_get_symbol_decl (gfc_symbol * sym)
 	{
 	  char name[GFC_MAX_MANGLED_SYMBOL_LEN + 2];
 
-	  if (sym->module[0])
+	  if (sym->module)
 	    {
 	      /* Also prefix the mangled name for symbols from modules.  */
 	      strcpy (&name[1], sym->name);
@@ -877,7 +901,7 @@ gfc_get_extern_function_decl (gfc_symbol * sym)
   gfc_expr e;
   gfc_intrinsic_sym *isym;
   gfc_expr argexpr;
-  char s[GFC_MAX_SYMBOL_LEN];
+  char s[GFC_MAX_SYMBOL_LEN + 13]; /* "f2c_specific" and '\0'.  */
   tree name;
   tree mangled_name;
 
@@ -913,7 +937,18 @@ gfc_get_extern_function_decl (gfc_symbol * sym)
 	  gcc_assert (isym->formal->next->next == NULL);
 	  isym->resolve.f2 (&e, &argexpr, NULL);
 	}
-      sprintf (s, "specific%s", e.value.function.name);
+
+      if (gfc_option.flag_f2c
+	  && ((e.ts.type == BT_REAL && e.ts.kind == gfc_default_real_kind)
+	      || e.ts.type == BT_COMPLEX))
+	{
+	  /* Specific which needs a different implementation if f2c
+	     calling conventions are used.  */
+	  sprintf (s, "f2c_specific%s", e.value.function.name);
+	}
+      else
+	sprintf (s, "specific%s", e.value.function.name);
+
       name = get_identifier (s);
       mangled_name = name;
     }
@@ -1135,6 +1170,7 @@ create_function_arglist (gfc_symbol * sym)
       DECL_CONTEXT (parm) = fndecl;
       DECL_ARG_TYPE (parm) = type;
       TREE_READONLY (parm) = 1;
+      DECL_ARTIFICIAL (parm) = 1;
       gfc_finish_decl (parm, NULL_TREE);
 
       arglist = chainon (arglist, parm);
@@ -1162,6 +1198,7 @@ create_function_arglist (gfc_symbol * sym)
 	  DECL_CONTEXT (length) = fndecl;
 	  DECL_ARG_TYPE (length) = type;
 	  TREE_READONLY (length) = 1;
+	  DECL_ARTIFICIAL (length) = 1;
 	  gfc_finish_decl (length, NULL_TREE);
 	}
     }
@@ -1216,6 +1253,7 @@ create_function_arglist (gfc_symbol * sym)
 
       arglist = chainon (arglist, length);
       DECL_CONTEXT (length) = fndecl;
+      DECL_ARTIFICIAL (length) = 1;
       DECL_ARG_TYPE (length) = type;
       TREE_READONLY (length) = 1;
       gfc_finish_decl (length, NULL_TREE);
@@ -1348,12 +1386,24 @@ build_entry_thunks (gfc_namespace * ns)
       args = tree_cons (NULL_TREE, tmp, NULL_TREE);
       string_args = NULL_TREE;
 
-      /* TODO: Pass return by reference parameters.  */
-      if (ns->proc_name->attr.function)
-	gfc_todo_error ("Functons with multiple entry points");
-      
+      if (thunk_sym->attr.function)
+	{
+	  if (gfc_return_by_reference (ns->proc_name))
+	    {
+	      tree ref = DECL_ARGUMENTS (current_function_decl);
+	      args = tree_cons (NULL_TREE, ref, args);
+	      if (ns->proc_name->ts.type == BT_CHARACTER)
+		args = tree_cons (NULL_TREE, TREE_CHAIN (ref),
+				  args);
+	    }
+	}
+
       for (formal = ns->proc_name->formal; formal; formal = formal->next)
 	{
+	  /* Ignore alternate returns.  */
+	  if (formal->sym == NULL)
+	    continue;
+
 	  /* We don't have a clever way of identifying arguments, so resort to
 	     a brute-force search.  */
 	  for (thunk_formal = thunk_sym->formal;
@@ -1392,7 +1442,47 @@ build_entry_thunks (gfc_namespace * ns)
       args = chainon (args, nreverse (string_args));
       tmp = ns->proc_name->backend_decl;
       tmp = gfc_build_function_call (tmp, args);
-      /* TODO: function return value.  */
+      if (ns->proc_name->attr.mixed_entry_master)
+	{
+	  tree union_decl, field;
+	  tree master_type = TREE_TYPE (ns->proc_name->backend_decl);
+
+	  union_decl = build_decl (VAR_DECL, get_identifier ("__result"),
+				   TREE_TYPE (master_type));
+	  DECL_ARTIFICIAL (union_decl) = 1;
+	  DECL_EXTERNAL (union_decl) = 0;
+	  TREE_PUBLIC (union_decl) = 0;
+	  TREE_USED (union_decl) = 1;
+	  layout_decl (union_decl, 0);
+	  pushdecl (union_decl);
+
+	  DECL_CONTEXT (union_decl) = current_function_decl;
+	  tmp = build2 (MODIFY_EXPR,
+			TREE_TYPE (union_decl),
+			union_decl, tmp);
+	  gfc_add_expr_to_block (&body, tmp);
+
+	  for (field = TYPE_FIELDS (TREE_TYPE (union_decl));
+	       field; field = TREE_CHAIN (field))
+	    if (strcmp (IDENTIFIER_POINTER (DECL_NAME (field)),
+		thunk_sym->result->name) == 0)
+	      break;
+	  gcc_assert (field != NULL_TREE);
+	  tmp = build3 (COMPONENT_REF, TREE_TYPE (field), union_decl, field,
+			NULL_TREE);
+	  tmp = build2 (MODIFY_EXPR,
+			TREE_TYPE (DECL_RESULT (current_function_decl)),
+			DECL_RESULT (current_function_decl), tmp);
+	  tmp = build1_v (RETURN_EXPR, tmp);
+	}
+      else if (TREE_TYPE (DECL_RESULT (current_function_decl))
+	       != void_type_node)
+	{
+	  tmp = build2 (MODIFY_EXPR,
+			TREE_TYPE (DECL_RESULT (current_function_decl)),
+			DECL_RESULT (current_function_decl), tmp);
+	  tmp = build1_v (RETURN_EXPR, tmp);
+	}
       gfc_add_expr_to_block (&body, tmp);
 
       /* Finish off this function and send it for code generation.  */
@@ -1421,10 +1511,19 @@ build_entry_thunks (gfc_namespace * ns)
 	 points and the master function.  Clear them so that they are
 	 recreated for each function.  */
       for (formal = thunk_sym->formal; formal; formal = formal->next)
+	if (formal->sym != NULL)  /* Ignore alternate returns.  */
+	  {
+	    formal->sym->backend_decl = NULL_TREE;
+	    if (formal->sym->ts.type == BT_CHARACTER)
+	      formal->sym->ts.cl->backend_decl = NULL_TREE;
+	  }
+
+      if (thunk_sym->attr.function)
 	{
-	  formal->sym->backend_decl = NULL_TREE;
-	  if (formal->sym->ts.type == BT_CHARACTER)
-	    formal->sym->ts.cl->backend_decl = NULL_TREE;
+	  if (thunk_sym->ts.type == BT_CHARACTER)
+	    thunk_sym->ts.cl->backend_decl = NULL_TREE;
+	  if (thunk_sym->result->ts.type == BT_CHARACTER)
+	    thunk_sym->result->ts.cl->backend_decl = NULL_TREE;
 	}
     }
 
@@ -1459,6 +1558,29 @@ gfc_get_fake_result_decl (gfc_symbol * sym)
 
   char name[GFC_MAX_SYMBOL_LEN + 10];
 
+  if (sym
+      && sym->ns->proc_name->backend_decl == current_function_decl
+      && sym->ns->proc_name->attr.mixed_entry_master
+      && sym != sym->ns->proc_name)
+    {
+      decl = gfc_get_fake_result_decl (sym->ns->proc_name);
+      if (decl)
+	{
+	  tree field;
+
+	  for (field = TYPE_FIELDS (TREE_TYPE (decl));
+	       field; field = TREE_CHAIN (field))
+	    if (strcmp (IDENTIFIER_POINTER (DECL_NAME (field)),
+		sym->name) == 0)
+	      break;
+
+	  gcc_assert (field != NULL_TREE);
+	  decl = build3 (COMPONENT_REF, TREE_TYPE (field), decl, field,
+			 NULL_TREE);
+	}
+      return decl;
+    }
+
   if (current_fake_result_decl != NULL_TREE)
     return current_fake_result_decl;
 
@@ -1476,7 +1598,11 @@ gfc_get_fake_result_decl (gfc_symbol * sym)
 
   if (gfc_return_by_reference (sym))
     {
-      decl = DECL_ARGUMENTS (sym->backend_decl);
+      decl = DECL_ARGUMENTS (current_function_decl);
+
+      if (sym->ns->proc_name->backend_decl == current_function_decl
+	  && sym->ns->proc_name->attr.entry_master)
+	decl = TREE_CHAIN (decl);
 
       TREE_USED (decl) = 1;
       if (sym->as)
@@ -1893,11 +2019,17 @@ gfc_trans_deferred_vars (gfc_symbol * proc_sym, tree fnbody)
     {
       if (!current_fake_result_decl)
 	{
-	  warning ("Function does not return a value");
-	  return fnbody;
+	  gfc_entry_list *el = NULL;
+	  if (proc_sym->attr.entry_master)
+	    {
+	      for (el = proc_sym->ns->entries; el; el = el->next)
+		if (el->sym != el->sym->result)
+		  break;
+	    }
+	  if (el == NULL)
+	    warning ("Function does not return a value");
 	}
-
-      if (proc_sym->as)
+      else if (proc_sym->as)
 	{
 	  fnbody = gfc_trans_dummy_array_bias (proc_sym,
 					       current_fake_result_decl,
@@ -1909,7 +2041,8 @@ gfc_trans_deferred_vars (gfc_symbol * proc_sym, tree fnbody)
 	    fnbody = gfc_trans_dummy_character (proc_sym->ts.cl, fnbody);
 	}
       else
-	gfc_todo_error ("Deferred non-array return by reference");
+	gcc_assert (gfc_option.flag_f2c
+		    && proc_sym->ts.type == BT_COMPLEX);
     }
 
   for (sym = proc_sym->tlink; sym != proc_sym; sym = sym->tlink)
@@ -1995,7 +2128,7 @@ gfc_create_module_variable (gfc_symbol * sym)
       internal_error ("module symbol %s in wrong namespace", sym->name);
     }
 
-  /* Only output variables and array valued parametes.  */
+  /* Only output variables and array valued parameters.  */
   if (sym->attr.flavor != FL_VARIABLE
       && (sym->attr.flavor != FL_PARAMETER || sym->attr.dimension == 0))
     return;
@@ -2088,12 +2221,12 @@ generate_local_decl (gfc_symbol * sym)
       if (sym->attr.referenced)
         gfc_get_symbol_decl (sym);
       else if (sym->attr.dummy && warn_unused_parameter)
-            warning ("unused parameter `%s'", sym->name);
+            warning ("unused parameter %qs", sym->name);
       /* Warn for unused variables, but not if they're inside a common
 	 block or are use-associated.  */
       else if (warn_unused_variable
 	       && !(sym->attr.in_common || sym->attr.use_assoc))
-	warning ("unused variable `%s'", sym->name); 
+	warning ("unused variable %qs", sym->name); 
     }
 }
 
@@ -2119,16 +2252,13 @@ gfc_trans_entry_master_switch (gfc_entry_list * el)
   for (; el; el = el->next)
     {
       /* Add the case label.  */
-      label = build_decl (LABEL_DECL, NULL_TREE, NULL_TREE);
-      DECL_CONTEXT (label) = current_function_decl;
+      label = gfc_build_label_decl (NULL_TREE);
       val = build_int_cst (gfc_array_index_type, el->id);
       tmp = build3_v (CASE_LABEL_EXPR, val, NULL_TREE, label);
       gfc_add_expr_to_block (&block, tmp);
       
       /* And jump to the actual entry point.  */
       label = gfc_build_label_decl (NULL_TREE);
-      TREE_USED (label) = 1;
-      DECL_CONTEXT (label) = current_function_decl;
       tmp = build1_v (GOTO_EXPR, label);
       gfc_add_expr_to_block (&block, tmp);
 
@@ -2185,6 +2315,19 @@ gfc_generate_function_code (gfc_namespace * ns)
   gfc_start_block (&block);
 
   gfc_generate_contained_functions (ns);
+
+  if (ns->entries && ns->proc_name->ts.type == BT_CHARACTER)
+    {
+      /* Copy length backend_decls to all entry point result
+	 symbols.  */
+      gfc_entry_list *el;
+      tree backend_decl;
+
+      gfc_conv_const_charlen (ns->proc_name->ts.cl);
+      backend_decl = ns->proc_name->result->ts.cl->backend_decl;
+      for (el = ns->entries; el; el = el->next)
+	el->sym->result->ts.cl->backend_decl = backend_decl;
+    }
 
   /* Translate COMMON blocks.  */
   gfc_trans_common (ns);
